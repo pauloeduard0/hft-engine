@@ -135,7 +135,7 @@ pub fn render(
     if cvd.has_data {
         let mins = cvd.candle_elapsed_secs / 60;
         let secs = cvd.candle_elapsed_secs % 60;
-        let _ = out.queue(Print(format!("  CVD  —  kline 5m  ({mins}m{secs:02}s)\n")));
+        let _ = out.queue(Print(format!("  CVD  —  @trade  ({mins}m{secs:02}s / 5m)\n")));
         let _ = out.queue(ResetColor);
 
         let ratio = if cvd.candle_total_vol > 0.0 {
@@ -255,7 +255,11 @@ fn render_signal(out: &mut impl Write, signal: &Signal) {
     if !signal.has_data() {
         let _ = out.queue(SetForegroundColor(Color::DarkGrey));
         let _ = out.queue(Print(box_line("  Aguardando fechamento do 1º candle...")));
-        let _ = out.queue(SetForegroundColor(Color::Magenta));
+        // 5 linhas em branco para igualar altura com o estado "tem sinal" (10 linhas total)
+        for _ in 0..5 {
+            let _ = out.queue(SetForegroundColor(Color::Magenta));
+            let _ = out.queue(Print(box_line("")));
+        }
         let _ = out.queue(Print("╚══════════════════════════════════════════════════════╝\n"));
         let _ = out.queue(ResetColor);
         return;

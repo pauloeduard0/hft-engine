@@ -216,13 +216,19 @@ async fn funding_loop(sym: String, tx: mpsc::Sender<FundingMsg>) {
             Ok((ws, _)) => {
                 log_err("funding connected");
                 let (_, mut read) = ws.split();
+                let mut funding_count = 0u32;
                 while let Some(Ok(msg)) = read.next().await {
                     let text = match msg {
                         Message::Text(t) => t,
                         Message::Binary(b) => String::from_utf8(b).unwrap_or_default(),
                         _ => continue,
                     };
+                    if funding_count < 2 {
+                        log_err(&format!("FUNDING raw={}", &text[..text.len().min(200)]));
+                        funding_count += 1;
+                    }
                     let Ok(ev) = serde_json::from_str::<MarkPriceEvent>(&text) else {
+                        log_err(&format!("FUNDING parse fail: {}", &text[..text.len().min(100)]));
                         continue;
                     };
                     let rate = ev.funding_rate.parse::<f64>().unwrap_or(0.0);

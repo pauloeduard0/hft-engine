@@ -38,25 +38,27 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
     let mut score = 0.0f64;
     let mut reasons: Vec<String> = Vec::new();
 
+    let price_change_pct = (last.close - last.open).abs() / last.open;
+    let meaningful_move = price_change_pct > 0.0002; // ignora candles com body < 0.02%
     let price_up = last.close > last.open;
     let cvd_pos = last.candle_cvd > 0.0;
     let total_vol = last.buy_vol + last.sell_vol;
-    let has_vol = total_vol > 0.01;
+    let has_vol = total_vol > 0.5; // mínimo 0.5 BTC de volume para sinal válido
 
     // ── 1. Divergência CVD vs preço (peso ±3.0) ──────────────────
-    // Sinal mais forte: quem realmente executou contradiz o preço
-    if has_vol {
+    // Requer movimento de preço mínimo para evitar ruído em candles flat
+    if has_vol && meaningful_move {
         if price_up && !cvd_pos {
             score -= 3.0;
             reasons.push(format!(
-                "CVD divergente: fechou ALTA, execução vendedora ({:.3} BTC)",
-                last.candle_cvd
+                "CVD divergente: fechou ALTA ({:.2}%), execução vendedora ({:.2} BTC)",
+                price_change_pct * 100.0, last.candle_cvd
             ));
         } else if !price_up && cvd_pos {
             score += 3.0;
             reasons.push(format!(
-                "CVD divergente: fechou BAIXA, execução compradora (+{:.3} BTC)",
-                last.candle_cvd
+                "CVD divergente: fechou BAIXA ({:.2}%), execução compradora (+{:.2} BTC)",
+                price_change_pct * 100.0, last.candle_cvd
             ));
         }
     }
