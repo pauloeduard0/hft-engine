@@ -126,24 +126,18 @@ async fn trade_loop(sym: String, tx: mpsc::Sender<TradeMsg>) {
             Ok((ws, resp)) => {
                 log_err(&format!("kline connected status={}", resp.status()));
 
-                let (mut write, mut read) = ws.split(); // ✔️ AQUI
+                let (mut write, mut read) = ws.split();
 
-                use tokio::time::{timeout, Duration};
                 use futures_util::SinkExt;
 
                 loop {
-                    match timeout(Duration::from_secs(10), read.next()).await {
-                        Err(_) => {
-                            log_err("kline TIMEOUT sem mensagens");
-                            break;
-                        }
-
-                        Ok(None) => {
+                    match read.next().await {
+                        None => {
                             log_err("kline stream terminou");
                             break;
                         }
 
-                        Ok(Some(result)) => {
+                        Some(result) => {
                             let text = match result {
                                 Ok(Message::Text(t)) => t,
 

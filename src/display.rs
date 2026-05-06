@@ -242,7 +242,13 @@ pub fn render(
 const BOX_W: usize = 54;
 
 fn box_line(content: &str) -> String {
-    format!("║{:<54}║\n", content)
+    let max_content = BOX_W - 2; // Deixar espaço para os │ das bordas
+    let content_truncated = if content.len() > max_content {
+        format!("{}…", &content[..max_content - 1])
+    } else {
+        content.to_string()
+    };
+    format!("║{:<width$}║\n", content_truncated, width = max_content + 2)
 }
 
 fn render_signal(out: &mut impl Write, signal: &Signal) {
@@ -255,13 +261,13 @@ fn render_signal(out: &mut impl Write, signal: &Signal) {
     if !signal.has_data() {
         let _ = out.queue(SetForegroundColor(Color::DarkGrey));
         let _ = out.queue(Print(box_line("  Aguardando fechamento do 1º candle...")));
-        // 5 linhas em branco para igualar altura com o estado "tem sinal" (10 linhas total)
         for _ in 0..5 {
             let _ = out.queue(SetForegroundColor(Color::Magenta));
             let _ = out.queue(Print(box_line("")));
         }
         let _ = out.queue(Print("╚══════════════════════════════════════════════════════╝\n"));
         let _ = out.queue(ResetColor);
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
         return;
     }
 
@@ -289,20 +295,22 @@ fn render_signal(out: &mut impl Write, signal: &Signal) {
     let _ = out.queue(Print(box_line("")));
 
     for reason in &signal.reasons {
-        let truncated: String = reason.chars().take(BOX_W - 4).collect();
+        let max_len = BOX_W - 6; // "  • " + espaço
+        let truncated: String = reason.chars().take(max_len).collect();
         let line = format!("  • {}", truncated);
         let _ = out.queue(SetForegroundColor(Color::DarkGrey));
         let _ = out.queue(Print(box_line(&line)));
     }
 
     for _ in 0..(4usize.saturating_sub(signal.reasons.len())) {
-        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(SetForegroundColor(Color::Magenta));
         let _ = out.queue(Print(box_line("")));
     }
 
     let _ = out.queue(SetForegroundColor(Color::Magenta));
     let _ = out.queue(Print("╚══════════════════════════════════════════════════════╝\n"));
     let _ = out.queue(ResetColor);
+    let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
 }
 
 fn ratio_bar(ratio: f64) -> String {
