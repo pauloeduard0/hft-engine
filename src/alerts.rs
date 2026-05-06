@@ -49,44 +49,40 @@ impl AlertEngine {
             });
         }
 
-        if cvd.has_data {
-            let total_trades = cvd.buy_volume + cvd.sell_volume;
+        if cvd.has_data && cvd.candle_total_vol > 0.0 {
+            // CVD normalizado: -1..1
+            let cvd_ratio = cvd.candle_cvd / cvd.candle_total_vol;
 
-            // ── CVD: divergência book vs execução real ────────────
-            // Book mostra compra mas traders estão vendendo → sinal de spoofing ou reversão
-            if m.imbalance > 0.4 && cvd.cvd_1min < -0.5 {
+            // ── Divergência book vs execução real ─────────────────
+            if m.imbalance > 0.4 && cvd_ratio < -0.2 {
                 self.push(Alert {
                     message: format!(
-                        "Divergência: book comprador, CVD negativo ({:.3})",
-                        cvd.cvd_1min
+                        "Divergência: book comprador, execução vendedora ({:.2})",
+                        cvd_ratio
                     ),
                     level: AlertLevel::Warning,
                 });
-            } else if m.imbalance < -0.4 && cvd.cvd_1min > 0.5 {
+            } else if m.imbalance < -0.4 && cvd_ratio > 0.2 {
                 self.push(Alert {
                     message: format!(
-                        "Divergência: book vendedor, CVD positivo ({:.3})",
-                        cvd.cvd_1min
+                        "Divergência: book vendedor, execução compradora (+{:.2})",
+                        cvd_ratio
                     ),
                     level: AlertLevel::Warning,
                 });
             }
 
-            // ── CVD: sinal de fechamento (últimos 60s do candle) ──
-            let near_close = cvd.candle_elapsed_secs >= 240;
-            if near_close && total_trades > 0.0 {
-                let ratio = cvd.candle_cvd / total_trades;
-                if ratio.abs() > 0.25 {
-                    let dir = if ratio > 0.0 { "ALTA" } else { "BAIXA" };
-                    self.push(Alert {
-                        message: format!(
-                            "CVD → {} no fechamento ({:.1}%)",
-                            dir,
-                            ratio.abs() * 100.0
-                        ),
-                        level: AlertLevel::Warning,
-                    });
-                }
+            // ── Sinal de fechamento (últimos 60s da vela) ─────────
+            if cvd.candle_elapsed_secs >= 240 && cvd_ratio.abs() > 0.25 {
+                let dir = if cvd_ratio > 0.0 { "ALTA" } else { "BAIXA" };
+                self.push(Alert {
+                    message: format!(
+                        "CVD → {} no fechamento ({:.1}%)",
+                        dir,
+                        cvd_ratio.abs() * 100.0
+                    ),
+                    level: AlertLevel::Warning,
+                });
             }
         }
 

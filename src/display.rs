@@ -12,12 +12,18 @@ use crate::alerts::{Alert, AlertLevel};
 use crate::cvd::CvdSnapshot;
 use crate::metrics::{Metrics, Trend};
 use crate::orderbook::OrderBook;
+use crate::feed::KLINE_COUNT;
+use crate::signal::{Direction, Signal};
 
 pub fn init() {
     let mut out = io::stdout();
     let _ = out.queue(terminal::EnterAlternateScreen);
     let _ = out.queue(terminal::Clear(ClearType::All));
     let _ = out.queue(cursor::Hide);
+    let _ = out.queue(cursor::MoveTo(0, 0));
+    let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+    let _ = out.queue(Print("  Conectando aos streams da Binance Futuros...\n"));
+    let _ = out.queue(ResetColor);
     let _ = out.flush();
 }
 
@@ -28,7 +34,14 @@ pub fn cleanup() {
     let _ = out.flush();
 }
 
-pub fn render(book: &OrderBook, m: &Metrics, cvd: &CvdSnapshot, alerts: &VecDeque<Alert>) {
+pub fn render(
+    book: &OrderBook,
+    m: &Metrics,
+    cvd: &CvdSnapshot,
+    funding_rate: f64,
+    signal: &Signal,
+    alerts: &VecDeque<Alert>,
+) {
     let mut out = io::stdout();
     let _ = out.queue(cursor::MoveTo(0, 0));
 
@@ -57,7 +70,7 @@ pub fn render(book: &OrderBook, m: &Metrics, cvd: &CvdSnapshot, alerts: &VecDequ
     )));
     let _ = out.queue(ResetColor);
 
-    // ── Order book (5 níveis) ─────────────────────────────────────
+    // ── Order book ────────────────────────────────────────────────
     let _ = out.queue(SetForegroundColor(Color::DarkYellow));
     let _ = out.queue(Print("         ASKS (venda)                BIDS (compra)\n"));
     let _ = out.queue(Print("  ──────────────────────────────────────────────────\n"));
@@ -82,7 +95,7 @@ pub fn render(book: &OrderBook, m: &Metrics, cvd: &CvdSnapshot, alerts: &VecDequ
     let _ = out.queue(Print("  BOOK\n"));
     let _ = out.queue(ResetColor);
 
-    let bar = imbalance_bar(m.imbalance);
+    let bar = ratio_bar(m.imbalance);
     let imb_color = if m.imbalance > 0.35 {
         Color::Green
     } else if m.imbalance < -0.35 {
@@ -115,57 +128,78 @@ pub fn render(book: &OrderBook, m: &Metrics, cvd: &CvdSnapshot, alerts: &VecDequ
     let _ = out.queue(Print(format!("  Micro Trend {}\n", trend_str)));
     let _ = out.queue(ResetColor);
 
-    // ── CVD ───────────────────────────────────────────────────────
+    // ── CVD (kline 5m) ────────────────────────────────────────────
     let _ = out.queue(Print("\n"));
     let _ = out.queue(SetForegroundColor(Color::Cyan));
 
     if cvd.has_data {
         let mins = cvd.candle_elapsed_secs / 60;
         let secs = cvd.candle_elapsed_secs % 60;
-        let _ = out.queue(Print(format!("  CVD  —  candle {mins}m{secs:02}s / 5m00s\n")));
+        let _ = out.queue(Print(format!("  CVD  —  kline 5m  ({mins}m{secs:02}s)\n")));
         let _ = out.queue(ResetColor);
 
-        let total = cvd.buy_volume + cvd.sell_volume;
-        let ratio = if total > 0.0 { cvd.candle_cvd / total } else { 0.0 };
-        let bar = imbalance_bar(ratio);
+        let ratio = if cvd.candle_total_vol > 0.0 {
+            cvd.candle_cvd / cvd.candle_total_vol
+        } else {
+            0.0
+        };
+        let bar = ratio_bar(ratio);
         let cvd_color =
-            if ratio > 0.2 { Color::Green } else if ratio < -0.2 { Color::Red } else { Color::Yellow };
+            if ratio > 0.1 { Color::Green } else if ratio < -0.1 { Color::Red } else { Color::Yellow };
 
         let _ = out.queue(Print("  Candle   "));
         let _ = out.queue(SetForegroundColor(cvd_color));
-        let _ = out.queue(Print(format!("{}  {:+.4} BTC\n", bar, cvd.candle_cvd)));
-        let _ = out.queue(ResetColor);
-
-        let c1_color = if cvd.cvd_1min > 0.0 { Color::Green } else { Color::Red };
-        let c2_color = if cvd.cvd_2min > 0.0 { Color::Green } else { Color::Red };
-        let _ = out.queue(Print("  1min  "));
-        let _ = out.queue(SetForegroundColor(c1_color));
-        let _ = out.queue(Print(format!("{:>+10.4}", cvd.cvd_1min)));
-        let _ = out.queue(ResetColor);
-        let _ = out.queue(Print("    2min  "));
-        let _ = out.queue(SetForegroundColor(c2_color));
-        let _ = out.queue(Print(format!("{:>+10.4}\n", cvd.cvd_2min)));
+        let _ = out.queue(Print(format!("{}  {:+.4} BTC", bar, cvd.candle_cvd)));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(Print("\n"));
         let _ = out.queue(ResetColor);
 
         let _ = out.queue(SetForegroundColor(Color::Green));
-        let _ = out.queue(Print(format!("  Buy  {:>10.4}", cvd.buy_volume)));
+        let _ = out.queue(Print(format!("  Buy  {:>10.4}", cvd.candle_buy_vol)));
         let _ = out.queue(ResetColor);
         let _ = out.queue(Print("  │  "));
         let _ = out.queue(SetForegroundColor(Color::Red));
-        let _ = out.queue(Print(format!("Sell  {:>10.4}", cvd.sell_volume)));
+        let _ = out.queue(Print(format!("Sell {:>10.4}", cvd.candle_sell_vol)));
+        let _ = out.queue(ResetColor);
+        let _ = out.queue(Print("  │  Total "));
+        let _ = out.queue(Print(format!("{:.4}\n", cvd.candle_total_vol)));
+
+        let prev_color = if cvd.prev_candle_cvd >= 0.0 { Color::Green } else { Color::Red };
+        let _ = out.queue(Print("  prev CVD  "));
+        let _ = out.queue(SetForegroundColor(prev_color));
+        let _ = out.queue(Print(format!("{:>+10.4} BTC", cvd.prev_candle_cvd)));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(Print("\n"));
         let _ = out.queue(ResetColor);
 
-        let prev_color = if cvd.prev_candle_cvd > 0.0 { Color::Green } else { Color::Red };
-        let _ = out.queue(Print("  │  prev  "));
-        let _ = out.queue(SetForegroundColor(prev_color));
-        let _ = out.queue(Print(format!("{:>+8.4}\n", cvd.prev_candle_cvd)));
+        // Funding rate
+        let (fund_color, fund_label) = if funding_rate > 0.0005 {
+            (Color::Red, "⚠ LONG overleveraged")
+        } else if funding_rate > 0.0001 {
+            (Color::Yellow, "↑ LONG elevado")
+        } else if funding_rate < -0.0003 {
+            (Color::Cyan, "⚠ SHORT overleveraged")
+        } else if funding_rate < -0.0001 {
+            (Color::Cyan, "↓ SHORT elevado")
+        } else {
+            (Color::DarkGrey, "neutro")
+        };
+        let _ = out.queue(Print("  Funding  "));
+        let _ = out.queue(SetForegroundColor(fund_color));
+        let _ = out.queue(Print(format!("{:>+.4}%  {}", funding_rate * 100.0, fund_label)));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(Print("\n"));
         let _ = out.queue(ResetColor);
     } else {
-        let _ = out.queue(Print("  CVD  —  aguardando trades...\n"));
+        let klines = KLINE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = out.queue(Print(format!("  CVD  —  aguardando kline 5m... (msgs não-depth: {klines})")));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(Print("\n"));
         let _ = out.queue(ResetColor);
-        let _ = out.queue(Print("                                                        \n"));
-        let _ = out.queue(Print("                                                        \n"));
-        let _ = out.queue(Print("                                                        \n"));
+        for _ in 0..4 {
+            let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+            let _ = out.queue(Print("\n"));
+        }
     }
 
     // ── Alertas ───────────────────────────────────────────────────
@@ -199,10 +233,74 @@ pub fn render(book: &OrderBook, m: &Metrics, cvd: &CvdSnapshot, alerts: &VecDequ
         let _ = out.queue(Print("\n"));
     }
 
+    // ── Sinal próximo candle ──────────────────────────────────────
+    render_signal(&mut out, signal);
+
     let _ = out.flush();
 }
 
-fn imbalance_bar(ratio: f64) -> String {
+const BOX_W: usize = 54;
+
+fn box_line(content: &str) -> String {
+    format!("║{:<54}║\n", content)
+}
+
+fn render_signal(out: &mut impl Write, signal: &Signal) {
+    let _ = out.queue(Print("\n"));
+    let _ = out.queue(SetForegroundColor(Color::Magenta));
+    let _ = out.queue(Print("╔══════════════════════════════════════════════════════╗\n"));
+    let _ = out.queue(Print("║  SINAL  ──  PRÓXIMO CANDLE (5min)                   ║\n"));
+    let _ = out.queue(Print("╠══════════════════════════════════════════════════════╣\n"));
+
+    if !signal.has_data() {
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(box_line("  Aguardando fechamento do 1º candle...")));
+        let _ = out.queue(SetForegroundColor(Color::Magenta));
+        let _ = out.queue(Print("╚══════════════════════════════════════════════════════╝\n"));
+        let _ = out.queue(ResetColor);
+        return;
+    }
+
+    let (sym, label, dir_color) = match signal.direction {
+        Direction::Bullish => ("▲", "BULLISH", Color::Green),
+        Direction::Bearish => ("▼", "BEARISH", Color::Red),
+        Direction::Neutral => ("─", "NEUTRO ", Color::Yellow),
+    };
+
+    let bar_len = (signal.confidence * 10.0) as usize;
+    let bar = format!("{}{}", "█".repeat(bar_len), "░".repeat(10 - bar_len));
+    let pct = signal.confidence * 100.0;
+    let score_str = format!("{:+.1}", signal.score);
+    let main_line = format!("  {} {}  {}  {:.0}%  score {}", sym, label, bar, pct, score_str);
+
+    let _ = out.queue(ResetColor);
+    let _ = out.queue(Print("║  "));
+    let _ = out.queue(SetForegroundColor(dir_color));
+    let _ = out.queue(Print(format!("{} {}  {}  {:.0}%  score {}", sym, label, bar, pct, score_str)));
+    let content_len = main_line.len() - 2;
+    let pad = BOX_W.saturating_sub(content_len + 2);
+    let _ = out.queue(Print(" ".repeat(pad)));
+    let _ = out.queue(SetForegroundColor(Color::Magenta));
+    let _ = out.queue(Print("║\n"));
+    let _ = out.queue(Print(box_line("")));
+
+    for reason in &signal.reasons {
+        let truncated = if reason.len() > BOX_W - 4 { &reason[..BOX_W - 4] } else { reason.as_str() };
+        let line = format!("  • {}", truncated);
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(box_line(&line)));
+    }
+
+    for _ in 0..(4usize.saturating_sub(signal.reasons.len())) {
+        let _ = out.queue(Print(box_line("")));
+    }
+
+    let _ = out.queue(SetForegroundColor(Color::Magenta));
+    let _ = out.queue(Print("╚══════════════════════════════════════════════════════╝\n"));
+    let _ = out.queue(ResetColor);
+}
+
+fn ratio_bar(ratio: f64) -> String {
     let filled = ((ratio.abs() * 10.0) as usize).min(10);
     let empty = 10 - filled;
     if ratio >= 0.0 {
