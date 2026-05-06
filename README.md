@@ -10,11 +10,13 @@ Connects to three live Binance USDⓈ-M Futures WebSocket streams simultaneously
 
 | Stream | Data | Update Rate |
 |---|---|---|
-| `btcusdt@depth20@100ms` | Order book (top 20 levels) | 100ms |
-| `btcusdt@trade` | Individual trade executions | Real-time |
-| `btcusdt@markPrice@1s` | Funding rate | 1s |
+| `<symbol>@depth20@100ms` | Order book (top 20 levels) | 100ms |
+| `<symbol>@trade` | Individual trade executions | Real-time |
+| `markPrice REST` | Funding rate (mark vs index) | Every 5s |
 
-Every tick it computes book metrics, accumulates CVD from trades, and displays everything in a live terminal UI. Every 5 minutes when a candle closes, it scores the closed candle and generates a directional signal for the **next** candle.
+On startup, fetches the last 20 closed 5-minute candles from the Binance REST API (`fapi/v1/klines`) to pre-seed the historical buffer — so RSI-14 and volume baselines are calibrated from the very first live candle.
+
+Every 100ms tick it computes book metrics and accumulates candle stats. Every 5 minutes when a candle closes, it scores it and generates a directional signal for the **next** candle.
 
 ---
 
@@ -44,17 +46,24 @@ Requires Rust 1.85+ (edition 2024). First run downloads ~150 dependencies.
       ...
 
   BOOK
-  Imbalance   [████████░░]  +0.821
+  Imbalance   [████████░░]  +0.821  live
+  Imb candle  +0.42 → +0.31 → -0.08  abr/méd/now
+  ΔVol candle +1247.3200  méd/tick +0.0124
   Bid Vol            15.832
   Ask Vol             1.557
   Δ Volume           +0.411
   Micro Trend ▲ ALTA
 
-  CVD  —  @trade  (3m42s)
-  Candle   [████░░░░░░]  +1.234 BTC  ▲
-  Buy  12.3456  │  Sell   9.876  │  Total  22.12
-  prev CVD       -0.234 BTC
-  Funding  +0.0142%  ↑ LONG elevado
+  CVD  —  @trade  (3m42s / 5m)
+  Candle   [████░░░░░░]  +1.2340 BTC
+  Buy  12.3456  │  Sell   9.8760  │  Total  22.1216
+  prev CVD       -0.2340 BTC
+  Premium  +0.0142%  ↑ LONG pressure
+
+  ANÁLISE DO CANDLE
+  RSI-14     ███████░░░  72.4  zona de sobrecompra
+  Imb Candle +0.42 → -0.15  ▼  exaustão compradora
+  Vol Ratio  2.4x  ⚠ spike
 
   ALERTAS
   ▶  CVD → ALTA no fechamento (68.4%)
@@ -63,12 +72,27 @@ Requires Rust 1.85+ (edition 2024). First run downloads ~150 dependencies.
 ╔══════════════════════════════════════════════════════╗
 ║  SINAL  ──  PRÓXIMO CANDLE (5min)                   ║
 ╠══════════════════════════════════════════════════════╣
-║  ▲ BULLISH  ████████░░  72%  score +4.5             ║
+║  ▼ BEARISH  ████████░░  72%  score -8.5             ║
 ║                                                      ║
-║  • CVD divergente: fechou BAIXA, execução compradora ║
-║  • Absorção alta: dominância CVD baixa (0.18)       ║
+║  • [-3.0] CVD divergente: fechou ALTA, exec vendedor ║
+║  • [-2.0] Absorção: CVD fraco (0.18) no move de alta ║
+║  • [-1.5] RSI sobrecomprado (76.2) → reversão        ║
+║  • [-2.0] Volume spike 2.4x + CVD divergente         ║
+║  • [-1.0] Exaustão compradora: imb +0.42→-0.15       ║
 ╚══════════════════════════════════════════════════════╝
 ```
+
+### BOOK section
+
+- **Imbalance live** — snapshot instantâneo do book a cada 100ms
+- **Imb candle** — evolução do imbalance no candle em andamento: abertura → média acumulada (usada pelo signal) → tick atual
+- **ΔVol candle** — soma acumulada das variações de tamanho do book desde que o candle abriu; positivo = book crescendo (liquidez aumentando), negativo = ordens sendo consumidas/canceladas
+
+### ANÁLISE DO CANDLE section
+
+- **RSI-14** — calculado sobre os 20 candles do histórico (seeded + live); barra colorida com zona de sobrecompra/sobrevenda
+- **Imb Candle** — open vs close imbalance do último candle fechado; indica se a pressão compradora/vendedora se exauriu durante o move
+- **Vol Ratio** — volume do último candle vs média dos anteriores; spike ≥ 2x é destacado
 
 ---
 
@@ -80,12 +104,19 @@ Requires Rust 1.85+ (edition 2024). First run downloads ~150 dependencies.
 ```
 imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume)
 ```
-Ranges from -1 to +1. Positive = buy-side pressure in the limit order book. Uses all 20 levels, not just the best bid/ask.
+Ranges from -1 to +1. Positive = buy-side pressure in the limit order book. Uses all 20 levels.
+
+The engine tracks three imbalance snapshots per candle:
+- `open_imbalance` — first tick after candle opens (book state before the move)
+- `avg_imbalance` — mean across all depth ticks (used in signal scoring)
+- `close_imbalance` — last tick before candle closes (residual pressure going into next candle)
 
 > ⚠️ **Limitation:** The book can be spoofed. Large limit orders are often placed and cancelled before execution. Treat imbalance as *intention*, not *action*.
 
 **Delta Volume (Δ Volume)**
 Change in total book volume between ticks. A sudden increase in bid volume while price doesn't move = absorption (hidden sellers). A sudden drop in ask volume = resistance being lifted.
+
+The candle-accumulated `ΔVol candle` shows the net direction of this change over the full 5-minute window.
 
 **Micro Trend**
 Compares current mid price against the mid price 5 ticks ago (~500ms). Confirms very short-term directional momentum.
@@ -94,7 +125,7 @@ Compares current mid price against the mid price 5 ticks ago (~500ms). Confirms 
 
 ### CVD — Cumulative Volume Delta (from trade stream)
 
-This is the primary signal. CVD tracks **who is actually executing**, not who is posting limit orders.
+The primary signal source. CVD tracks **who is actually executing**, not who is posting limit orders.
 
 ```
 per trade:
@@ -104,31 +135,25 @@ per trade:
 CVD = Σ delta  (accumulated since candle open)
 ```
 
-**`is_buyer_maker = false`** → buyer sent a market order and hit the ask → aggressive buy → `+qty`  
-**`is_buyer_maker = true`** → seller sent a market order and hit the bid → aggressive sell → `-qty`
-
 **CVD Dominance**
 ```
 cvd_dominance = |CVD| / total_volume   (0 to 1)
 ```
 - High dominance (> 0.6): execution is heavily one-directional → genuine momentum
-- Low dominance (< 0.25): buyers and sellers are roughly equal → pressure is being absorbed
-
-**Prev Candle CVD**
-The CVD of the last closed 5-minute candle. This is the key input for the directional signal.
+- Low dominance (< 0.25): buyers and sellers are roughly balanced → the move's fuel was weak
 
 ---
 
-### Funding Rate (from markPrice stream)
+### Funding Rate
 
-The 8-hour funding rate for the perpetual contract. Positive = longs pay shorts (market is over-leveraged long). Negative = shorts pay longs.
+Derived from the mark price vs index price spread (polled every 5s via REST).
 
 | Range | Meaning |
 |---|---|
-| > +0.05%/8h | Extreme long positioning → mean reversion risk |
+| > +0.05%/8h | Extreme long positioning → liquidation risk |
 | +0.01% to +0.05% | Elevated long bias |
 | -0.01% to +0.01% | Neutral |
-| < -0.03%/8h | Extreme short positioning → squeeze risk |
+| < -0.05%/8h | Extreme short positioning → squeeze risk |
 
 ---
 
@@ -136,92 +161,151 @@ The 8-hour funding rate for the perpetual contract. Positive = longs pay shorts 
 
 The signal is generated when a 5-minute candle closes. It scores the **closed candle** to predict the direction of the **next candle**.
 
-Each factor adds or subtracts from a raw score. The final direction is determined by the total:
 - Score ≥ +1.5 → **BULLISH**
 - Score ≤ -1.5 → **BEARISH**
 - Between -1.5 and +1.5 → **NEUTRAL**
 
-Confidence = `|score| / 9.0` (capped at 100%)
+Confidence = `|score| / 13.5` (capped at 100%)
 
 ### Scoring Factors
 
-#### 1. CVD Divergence — weight ±3.0 (strongest signal)
+#### 1. CVD Divergence — ±3.0 (strongest signal)
 
-The core insight: when price and execution disagree, mean reversion is likely for the next candle.
+When price and execution disagree, mean reversion is likely.
 
 | Situation | Score | Logic |
 |---|---|---|
-| Candle closed UP but CVD was negative | **-3.0** | Price rose on limit-order support, but real traders were selling → support will fade |
-| Candle closed DOWN but CVD was positive | **+3.0** | Price fell on limit-order resistance, but real traders were buying → resistance will fade |
-| CVD and price aligned (momentum) | ±1.0 | Genuine directional pressure → continuation |
+| Candle closed UP, CVD negative | **-3.0** | Price rose on limit-order support, but real traders were selling → support will fade |
+| Candle closed DOWN, CVD positive | **+3.0** | Price fell on limit-order resistance, but real traders were buying → resistance will fade |
 
-**Why it works:** Limit orders can hold price temporarily. When aggressive order flow (CVD) goes against the price direction, the limit orders are eventually exhausted and price reverts.
+Requires a meaningful price move (body > 0.02%) to filter flat candles.
 
-#### 2. Absorption — weight ±2.0
+#### 2. Absorption / Momentum — ±2.0 / ±1.5
 
-Low CVD dominance means a lot of volume traded in both directions, with neither side winning cleanly. This is a sign that one side is absorbing the other's pressure.
+Based on CVD dominance relative to **price direction** (not CVD direction — this avoids cancelling signal 1):
 
 ```
-if cvd_dominance < 0.25:
-  the dominant side's pressure was absorbed → reversal likely
-  score += 2.0 * (direction of expected reversal)
+if cvd_dominance < 0.25 and meaningful move:
+  execution was weak relative to price move → exhaustion
+  score -= 2.0 if price up   (buying fuel ran out)
+  score += 2.0 if price down  (selling fuel ran out)
 
 if cvd_dominance > 0.60 and CVD aligned with price:
-  genuine momentum, little resistance → continuation
-  score += 1.5 * (direction of momentum)
+  genuine momentum, continuation likely
+  score += 1.5 * direction of price
 ```
 
-#### 3. Book vs Execution Misalignment (Spoofing) — weight ±1.5
+#### 3. Spoofing / Hidden Accumulation — ±1.5
 
-When the order book showed strong buy pressure (high imbalance) but actual trades were sell-heavy (negative CVD), it suggests the buy-side orders were spoofed.
-
-```
-if avg_imbalance > +0.30 and CVD was negative:
-  spoofing detected → bearish signal: score -= 1.5
-
-if avg_imbalance < -0.30 and CVD was positive:
-  spoofing detected → bullish signal: score += 1.5
-```
-
-`avg_imbalance` is the average book imbalance measured across all depth ticks during the closed candle.
-
-#### 4. Multi-Candle Pattern — weight ±1.0
-
-A single divergent candle could be noise. Two consecutive candles with the same type of CVD divergence is a stronger signal.
+Compares `close_imbalance` (book state at candle close) against actual CVD direction:
 
 ```
-if prev_candle also had CVD divergence in the same direction:
-  score += 1.0 * (direction of signal)
+if close_imbalance > +0.30 and CVD negative:
+  book showed buyers but execution was selling → spoofed bids → score -= 1.5
+
+if close_imbalance < -0.30 and CVD positive:
+  book showed sellers but execution was buying → hidden accumulation → score += 1.5
 ```
 
-#### 5. Funding Rate — weight ±1.5
+Using `close_imbalance` (not avg) makes this more predictive: it captures the state of the book *going into* the next candle.
 
-Extreme funding rates indicate crowded positioning. Crowded trades tend to unwind.
+#### 4. Multi-Candle Pattern — ±1.0
+
+Two consecutive candles with the same CVD divergence increases conviction:
 
 ```
-funding > +0.05%/8h → overleveraged longs → score -= 1.5
-funding > +0.01%/8h → elevated longs     → score -= 0.75
-funding < -0.03%/8h → overleveraged shorts → score += 1.5
-funding < -0.01%/8h → elevated shorts     → score += 0.75
+if prev candle also had CVD divergence in same direction:
+  score += 1.0 * direction
 ```
 
-### Score Summary Table
+#### 5. Funding Rate — ±1.5
 
-| Factor | Bearish | Bullish | Max Weight |
+Extreme funding = crowded positioning = mean reversion risk:
+
+```
+funding > +0.05%  → overleveraged longs → score -= 1.5
+funding > +0.01%  → elevated longs     → score -= 0.75
+funding < -0.05%  → overleveraged shorts → score += 1.5
+funding < -0.01%  → elevated shorts     → score += 0.75
+```
+
+#### 6. Imbalance Exhaustion — ±1.0
+
+If the book's imbalance moves against the candle's price direction during the candle, buyers or sellers are losing conviction:
+
+```
+if price up and (close_imbalance - open_imbalance) < -0.20:
+  buying pressure faded during the up-move → score -= 1.0
+
+if price down and (close_imbalance - open_imbalance) > +0.20:
+  selling pressure faded during the down-move → score += 1.0
+```
+
+#### 7. Volume Spike — ±2.0 / ±0.5
+
+Compares current candle volume against the average of recent candles in history:
+
+```
+vol_ratio = total_vol / avg_vol (last N-1 candles)
+
+if vol_ratio >= 2.0 and CVD divergent:
+  high-conviction reversal event → score ±2.0
+
+if vol_ratio >= 2.0 and CVD aligned:
+  genuine breakout with real fuel → score ±1.5
+
+if vol_ratio >= 1.5:
+  elevated volume context → score ±0.5
+```
+
+#### 8. Wick Rejection — ±1.5 / ±0.75
+
+Long wicks with confirming CVD indicate price was rejected at a level:
+
+```
+upper_wick_ratio = (high - max(open, close)) / (high - low)
+lower_wick_ratio = (min(open, close) - low) / (high - low)
+
+if upper_wick_ratio >= 0.60 and CVD positive:
+  buyers tried to push higher but were rejected → score -= 1.5
+
+if lower_wick_ratio >= 0.60 and CVD negative:
+  sellers tried to push lower but were absorbed → score += 1.5
+```
+
+Thresholds of 0.40–0.59 give half weight (±0.75).
+
+#### 9. RSI-14 — ±1.5 / ±0.75
+
+Calculated from the last 20 candles (REST-seeded history + live):
+
+```
+RSI > 75 → overbought → score -= 1.5
+RSI > 70 → overbought zone → score -= 0.75
+RSI < 25 → oversold → score += 1.5
+RSI < 30 → oversold zone → score += 0.75
+```
+
+### Score Summary
+
+| # | Factor | Max Weight | Stacks with |
 |---|---|---|---|
-| CVD Divergence | price up, CVD down | price down, CVD up | ±3.0 |
-| Absorption | high-CVD side absorbed | — | ±2.0 |
-| Momentum | — | aligned CVD + strong candle | ±1.5 |
-| Spoofing detection | book buy, CVD sell | book sell, CVD buy | ±1.5 |
-| Multi-candle pattern | 2x same divergence | 2x same divergence | ±1.0 |
-| Funding rate | overleveraged long | overleveraged short | ±1.5 |
-| **Maximum possible** | | | **±9.0** |
+| 1 | CVD Divergence | ±3.0 | 2(abs), 3, 4, 6, 7 |
+| 2 | Absorption / Momentum | ±2.0 / ±1.5 | 1 (absorption), mutually exclusive with 1 (momentum) |
+| 3 | Spoofing / Hidden accumulation | ±1.5 | 1 |
+| 4 | Multi-candle pattern | ±1.0 | 1 |
+| 5 | Funding rate | ±1.5 | all |
+| 6 | Imbalance exhaustion | ±1.0 | 1 |
+| 7 | Volume spike | ±2.0 | 1, 2, 6 |
+| 8 | Wick rejection | ±1.5 | 2, 5, 9 (note: mutually exclusive with 1 on bearish) |
+| 9 | RSI-14 | ±1.5 | all |
+| | **Maximum possible** | **±13.5** | |
 
 ---
 
 ## Alerts
 
-Real-time alerts fire on edge-triggered events (only once per crossing, not every tick):
+Real-time alerts fire on edge-triggered events (only once per crossing):
 
 | Alert | Trigger |
 |---|---|
@@ -239,35 +323,55 @@ Every time a 5-minute candle closes, a row is appended to `candles.csv`:
 ```
 open_time, open, high, low, close,
 candle_cvd, buy_vol, sell_vol,
-avg_imbalance, cvd_dominance, cvd_aligned,
-funding_rate
+open_imbalance, avg_imbalance, close_imbalance,
+cvd_dominance, cvd_aligned, funding_rate
 ```
 
-After ~500 candles (~42 hours of running), you have enough data to train a binary classifier:
+The three imbalance columns (`open`, `avg`, `close`) let you study how book pressure evolved *during* the candle, not just its average state — useful for training reversal vs continuation classifiers.
+
+After ~200 candles (~17 hours) you have enough data to experiment with:
 
 ```python
 label = (close[n+1] < close[n])  # 1 = next candle bearish, 0 = bullish
-```
 
-Features to try: `candle_cvd`, `cvd_dominance`, `avg_imbalance`, `cvd_aligned`, `funding_rate`.
+features = [
+    'candle_cvd', 'cvd_dominance', 'cvd_aligned',
+    'open_imbalance', 'avg_imbalance', 'close_imbalance',
+    'funding_rate'
+]
+```
 
 ---
 
 ## Architecture
 
 ```
-Binance Futures WebSocket
+Binance REST (startup)
+    └── fapi/v1/klines ──→ CandleBuilder.seed_history()  ← 20 candles for RSI/vol baseline
+
+Binance Futures WebSocket (live)
     │
-    ├── @depth20@100ms ──→ OrderBook ──→ Metrics (imbalance, Δvol, micro trend)
-    │                                         │
-    ├── @trade ──────────→ CvdEngine ──→ CvdSnapshot ──→ Signal (on candle close)
-    │                          │
-    │                    (candle close) ──→ CandleBuilder ──→ candles.csv
+    ├── @depth20@100ms ──→ OrderBook ──→ MetricsEngine (imbalance, Δvol, micro trend)
+    │                                          │
+    │                                    CandleBuilder.update_book()
+    │                                    (accumulates: imb open/avg/close, ΔVol sum)
+    │                                          │
+    │                                    display::render() ← every 100ms
     │
-    └── @markPrice@1s ──→ funding_rate ──→ Signal scoring
+    ├── @trade ──────────→ CvdEngine ──→ candle close detected
+    │                                          │
+    │                                    CandleBuilder.close_from_cvd()
+    │                                    → CandleData → history (20 candles)
+    │                                    → candles.csv
+    │                                    → signal::generate() → Signal
+    │
+    └── markPrice REST ──→ funding_rate ──→ signal scoring + display
 ```
 
-**Key design decision:** Rendering is triggered by depth ticks (every 100ms). Trade messages update the CVD state between renders. This means the display always shows fresh book data without being overwhelmed by the trade stream frequency.
+**Key design decisions:**
+- Rendering is triggered by depth ticks (100ms), not trades — keeps the UI smooth without being overwhelmed by the trade stream
+- Historical seeding via REST on startup means RSI-14, volume spike detection, and multi-candle patterns are all active from the first live candle close
+- Imbalance is tracked at three points per candle (open/avg/close) to separate pre-move book state from in-move pressure from closing book state
 
 ---
 
@@ -279,8 +383,8 @@ Binance Futures WebSocket
 | `orderbook.rs` | In-memory order book (Vec of PriceLevels, sorted) |
 | `metrics.rs` | Book-derived metrics: imbalance, delta volume, micro trend |
 | `cvd.rs` | CVD accumulation per 5-min candle, candle boundary detection |
-| `candle.rs` | OHLC tracking from mid price, feature extraction, CSV write |
-| `signal.rs` | Scoring engine, directional signal generation |
+| `candle.rs` | OHLC tracking, imbalance lifecycle, CSV write, REST seeding |
+| `signal.rs` | 9-factor scoring engine, RSI-14 computation, signal generation |
 | `alerts.rs` | Edge-triggered alert detection |
 | `display.rs` | Terminal UI (crossterm, alternate screen) |
 | `main.rs` | Async runtime, channel wiring, render loop |
@@ -290,9 +394,10 @@ Binance Futures WebSocket
 ## Dependencies
 
 ```toml
-tokio          # async runtime
+tokio              # async runtime
 tokio-tungstenite  # WebSocket client (native-tls)
+reqwest            # REST client (klines seed + funding rate)
 serde / serde_json # JSON parsing
-futures-util   # stream combinators
-crossterm      # terminal UI
+futures-util       # stream combinators
+crossterm          # terminal UI
 ```
