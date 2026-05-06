@@ -28,7 +28,24 @@ impl Signal {
 }
 
 // Peso máximo possível (soma de todos os sinais)
-const MAX_SCORE: f64 = 9.0;
+const MAX_SCORE: f64 = 13.5;
+
+pub fn compute_rsi(history: &VecDeque<CandleData>) -> Option<f64> {
+    let n = history.len();
+    if n < 4 { return None; }
+    let periods = (n - 1).min(14);
+    let start = n - 1 - periods;
+    let mut gains = 0.0f64;
+    let mut losses = 0.0f64;
+    for i in (start + 1)..n {
+        let change = history[i].close - history[i - 1].close;
+        if change > 0.0 { gains += change; } else { losses += change.abs(); }
+    }
+    let avg_gain = gains / periods as f64;
+    let avg_loss = losses / periods as f64;
+    if avg_loss == 0.0 { return Some(100.0); }
+    Some(100.0 - (100.0 / (1.0 + avg_gain / avg_loss)))
+}
 
 pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
     let Some(last) = history.back() else {
@@ -63,43 +80,44 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
         }
     }
 
-    // ── 2. Absorção (peso ±2.0) ───────────────────────────────────
-    // cvd_dominance baixo = pressão absorvida por limite orders → reversão
-    // cvd_dominance alto + preço alinhado → momentum genuíno → continuação
-    if has_vol {
+    // ── 2. Absorção / Momentum (peso ±2.0 / ±1.5) ───────────────
+    // Dominância baixa = execução fraca em relação ao volume total → o move do preço
+    // não teve combustível real → sinal na direção OPOSTA ao preço (exaustão)
+    // Dominância alta alinhada com preço → momentum genuíno → continuação
+    if has_vol && meaningful_move {
         if last.cvd_dominance < 0.25 {
-            let dir = if cvd_pos { -1.0 } else { 1.0 };
+            let dir = if price_up { -1.0 } else { 1.0 };
             score += dir * 2.0;
             let score_tag = if dir < 0.0 { "[-2.0]" } else { "[+2.0]" };
             reasons.push(format!(
-                "{} Absorção alta: dom. CVD {:.2} → pressão absorvida",
-                score_tag, last.cvd_dominance
+                "{} Absorção: CVD fraco ({:.2}) no move de {} → exaustão",
+                score_tag, last.cvd_dominance, if price_up { "alta" } else { "baixa" }
             ));
         } else if last.cvd_dominance > 0.6 && last.cvd_aligned {
             let dir = if price_up { 1.0 } else { -1.0 };
             score += dir * 1.5;
             let score_tag = if dir > 0.0 { "[+1.5]" } else { "[-1.5]" };
             reasons.push(format!(
-                "{} Momentum: CVD unilateral ({:.2}) alinhado",
+                "{} Momentum: CVD unilateral ({:.2}) alinhado com preço",
                 score_tag, last.cvd_dominance
             ));
         }
     }
 
     // ── 3. Book vs execução real (peso ±1.5) ─────────────────────
-    // Imbalance do book != direção do CVD → provável spoofing
-    let imb = last.avg_imbalance;
+    // close_imbalance (estado no fechamento) vs direção do CVD → spoofing ou acumulação oculta
+    let imb = last.close_imbalance;
     if has_vol {
         if imb > 0.3 && !cvd_pos {
             score -= 1.5;
             reasons.push(format!(
-                "[-1.5] Spoofing: book comprador (imb {:.2}), execução vendedora",
+                "[-1.5] Spoofing: book comprador no fechamento (imb {:.2}), execução vendedora",
                 imb
             ));
         } else if imb < -0.3 && cvd_pos {
             score += 1.5;
             reasons.push(format!(
-                "[+1.5] Spoofing: book vendedor (imb {:.2}), execução compradora",
+                "[+1.5] Acumulação oculta: book vendedor no fechamento (imb {:.2}), execução compradora",
                 imb
             ));
         }
@@ -151,6 +169,126 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
             "[+0.75] Premium SHORT ({:+.4}%) → futuros abaixo do spot",
             funding_rate * 100.0
         ));
+    }
+
+    // ── 6. Exaustão de imbalance (peso ±1.0) ─────────────────────
+    // Preço subiu mas book foi perdendo pressão compradora ao longo do candle = compradores exaustos
+    // Preço caiu mas book foi perdendo pressão vendedora = vendedores exaustos → reversão provável
+    let imb_slope = last.close_imbalance - last.open_imbalance;
+    if meaningful_move && has_vol {
+        if price_up && imb_slope < -0.2 {
+            score -= 1.0;
+            reasons.push(format!(
+                "[-1.0] Exaustão compradora: imb {:.2}→{:.2} durante alta",
+                last.open_imbalance, last.close_imbalance
+            ));
+        } else if !price_up && imb_slope > 0.2 {
+            score += 1.0;
+            reasons.push(format!(
+                "[+1.0] Exaustão vendedora: imb {:.2}→{:.2} durante baixa",
+                last.open_imbalance, last.close_imbalance
+            ));
+        }
+    }
+
+    // ── 7. Volume spike (peso ±2.0 divergência / ±1.5 momentum) ──
+    // Volume muito acima da média recente = evento de mercado significativo.
+    // Spike + CVD divergente → reversão de alta probabilidade (smart money absorvendo).
+    // Spike + CVD alinhado  → breakout com combustível real → continuação.
+    let n = history.len();
+    if n >= 3 && has_vol && meaningful_move {
+        let avg_vol: f64 = {
+            let sum: f64 = history.iter().take(n - 1).map(|c| c.buy_vol + c.sell_vol).sum();
+            sum / (n - 1) as f64
+        };
+        if avg_vol > 0.0 {
+            let vol_ratio = total_vol / avg_vol;
+            if vol_ratio >= 2.0 {
+                if !last.cvd_aligned {
+                    let dir = if price_up { -1.0 } else { 1.0 };
+                    score += dir * 2.0;
+                    let tag = if dir < 0.0 { "[-2.0]" } else { "[+2.0]" };
+                    reasons.push(format!(
+                        "{} Volume spike {:.1}x + CVD divergente → reversão",
+                        tag, vol_ratio
+                    ));
+                } else {
+                    let dir = if price_up { 1.0 } else { -1.0 };
+                    score += dir * 1.5;
+                    let tag = if dir > 0.0 { "[+1.5]" } else { "[-1.5]" };
+                    reasons.push(format!(
+                        "{} Volume spike {:.1}x + CVD alinhado → breakout",
+                        tag, vol_ratio
+                    ));
+                }
+            } else if vol_ratio >= 1.5 {
+                let dir = if price_up { -0.5 } else { 0.5 };
+                score += dir;
+                let tag = if dir < 0.0 { "[-0.5]" } else { "[+0.5]" };
+                reasons.push(format!(
+                    "{} Volume elevado {:.1}x vs média",
+                    tag, vol_ratio
+                ));
+            }
+        }
+    }
+
+    // ── 8. Rejeição de wick (peso ±1.5 / ±0.75) ─────────────────
+    // Wick superior longo + CVD comprador = compradores foram rejeitados no topo → bearish
+    // Wick inferior longo + CVD vendedor  = vendedores foram absorvidos no fundo → bullish
+    let range = last.high - last.low;
+    if range > 0.0 && has_vol {
+        let upper_wick = last.high - last.close.max(last.open);
+        let lower_wick = last.close.min(last.open) - last.low;
+        let upper_ratio = upper_wick / range;
+        let lower_ratio = lower_wick / range;
+
+        if upper_ratio >= 0.6 && cvd_pos {
+            score -= 1.5;
+            reasons.push(format!(
+                "[-1.5] Rejeição topo: wick superior {:.0}% do range, CVD comprador",
+                upper_ratio * 100.0
+            ));
+        } else if upper_ratio >= 0.4 && cvd_pos {
+            score -= 0.75;
+            reasons.push(format!(
+                "[-0.75] Wick superior {:.0}% + CVD comprador → pressão vendedora no topo",
+                upper_ratio * 100.0
+            ));
+        }
+
+        if lower_ratio >= 0.6 && !cvd_pos {
+            score += 1.5;
+            reasons.push(format!(
+                "[+1.5] Rejeição fundo: wick inferior {:.0}% do range, CVD vendedor",
+                lower_ratio * 100.0
+            ));
+        } else if lower_ratio >= 0.4 && !cvd_pos {
+            score += 0.75;
+            reasons.push(format!(
+                "[+0.75] Wick inferior {:.0}% + CVD vendedor → suporte absorvendo a baixa",
+                lower_ratio * 100.0
+            ));
+        }
+    }
+
+    // ── 9. RSI-14 (peso ±1.5 / ±0.75) ───────────────────────────
+    // Sobrecomprado → pressão de venda iminente; sobrevendido → reversão provável.
+    // Baseado nos últimos 20 candles (seeded da Binance + live), usando até 14 períodos.
+    if let Some(rsi) = compute_rsi(history) {
+        if rsi > 75.0 {
+            score -= 1.5;
+            reasons.push(format!("[-1.5] RSI sobrecomprado ({:.1}) → reversão provável", rsi));
+        } else if rsi > 70.0 {
+            score -= 0.75;
+            reasons.push(format!("[-0.75] RSI alto ({:.1}) → zona de sobrecompra", rsi));
+        } else if rsi < 25.0 {
+            score += 1.5;
+            reasons.push(format!("[+1.5] RSI sobrevendido ({:.1}) → reversão provável", rsi));
+        } else if rsi < 30.0 {
+            score += 0.75;
+            reasons.push(format!("[+0.75] RSI baixo ({:.1}) → zona de sobrevenda", rsi));
+        }
     }
 
     let direction = if score <= -1.5 {

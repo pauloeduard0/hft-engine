@@ -9,11 +9,12 @@ use crossterm::{
 };
 
 use crate::alerts::{Alert, AlertLevel};
+use crate::candle::CandleData;
 use crate::cvd::CvdSnapshot;
 use crate::metrics::{Metrics, Trend};
 use crate::orderbook::OrderBook;
 use crate::feed::KLINE_COUNT;
-use crate::signal::{Direction, Signal};
+use crate::signal::{compute_rsi, Direction, Signal};
 
 pub fn init() {
     let mut out = io::stdout();
@@ -41,6 +42,7 @@ pub fn render(
     funding_rate: f64,
     signal: &Signal,
     alerts: &VecDeque<Alert>,
+    candle_history: &VecDeque<CandleData>,
 ) {
     let mut out = io::stdout();
     let _ = out.queue(cursor::MoveTo(0, 0));
@@ -202,6 +204,91 @@ pub fn render(
         }
     }
 
+    // ── Análise do candle ─────────────────────────────────────────
+    let _ = out.queue(Print("\n"));
+    let _ = out.queue(SetForegroundColor(Color::Cyan));
+    let _ = out.queue(Print("  ANÁLISE DO CANDLE\n"));
+    let _ = out.queue(ResetColor);
+
+    // RSI
+    if let Some(rsi) = compute_rsi(candle_history) {
+        let (rsi_color, rsi_label) = if rsi > 75.0 {
+            (Color::Red, "sobrecomprado !")
+        } else if rsi > 70.0 {
+            (Color::Yellow, "zona de sobrecompra")
+        } else if rsi < 25.0 {
+            (Color::Green, "sobrevendido !")
+        } else if rsi < 30.0 {
+            (Color::Green, "zona de sobrevenda")
+        } else {
+            (Color::White, "neutro")
+        };
+        let filled = ((rsi / 10.0) as usize).min(10);
+        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+        let _ = out.queue(Print("  RSI-14     "));
+        let _ = out.queue(SetForegroundColor(rsi_color));
+        let _ = out.queue(Print(format!("{}  {:.1}  {}", bar, rsi, rsi_label)));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(Print("\n"));
+        let _ = out.queue(ResetColor);
+    } else {
+        let n = candle_history.len();
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(format!("  RSI-14     aguardando histórico ({}/4 candles)\n", n)));
+        let _ = out.queue(ResetColor);
+    }
+
+    // Imbalance evolution e volume ratio do último candle fechado
+    if let Some(last) = candle_history.back() {
+        let imb_slope = last.close_imbalance - last.open_imbalance;
+        let (slope_sym, slope_label, slope_color) = if imb_slope < -0.15 {
+            ("▼", "exaustão compradora", Color::Red)
+        } else if imb_slope > 0.15 {
+            ("▲", "exaustão vendedora", Color::Green)
+        } else {
+            ("─", "estável", Color::Yellow)
+        };
+        let _ = out.queue(Print("  Imb Candle "));
+        let _ = out.queue(SetForegroundColor(slope_color));
+        let _ = out.queue(Print(format!(
+            "{:+.2} → {:+.2}  {}  {}",
+            last.open_imbalance, last.close_imbalance, slope_sym, slope_label
+        )));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(Print("\n"));
+        let _ = out.queue(ResetColor);
+
+        // Volume ratio vs média dos últimos candles
+        let n = candle_history.len();
+        if n >= 2 {
+            let total_vol = last.buy_vol + last.sell_vol;
+            let avg_vol: f64 = candle_history.iter().take(n - 1)
+                .map(|c| c.buy_vol + c.sell_vol)
+                .sum::<f64>() / (n - 1) as f64;
+            if avg_vol > 0.0 {
+                let ratio = total_vol / avg_vol;
+                let (vol_color, vol_label) = if ratio >= 2.0 {
+                    (Color::Red, "⚠ spike")
+                } else if ratio >= 1.5 {
+                    (Color::Yellow, "elevado")
+                } else {
+                    (Color::White, "normal")
+                };
+                let _ = out.queue(Print("  Vol Ratio  "));
+                let _ = out.queue(SetForegroundColor(vol_color));
+                let _ = out.queue(Print(format!("{:.1}x  {}", ratio, vol_label)));
+                let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+                let _ = out.queue(Print("\n"));
+                let _ = out.queue(ResetColor);
+            }
+        }
+    } else {
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print("  Imb Candle aguardando 1º candle fechado\n"));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(ResetColor);
+    }
+
     // ── Alertas ───────────────────────────────────────────────────
     let _ = out.queue(Print("\n"));
     let _ = out.queue(SetForegroundColor(Color::Cyan));
@@ -302,7 +389,7 @@ fn render_signal(out: &mut impl Write, signal: &Signal) {
         let _ = out.queue(Print(box_line(&line)));
     }
 
-    for _ in 0..(4usize.saturating_sub(signal.reasons.len())) {
+    for _ in 0..(6usize.saturating_sub(signal.reasons.len())) {
         let _ = out.queue(SetForegroundColor(Color::Magenta));
         let _ = out.queue(Print(box_line("")));
     }

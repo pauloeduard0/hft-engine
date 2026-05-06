@@ -36,6 +36,8 @@ async fn main() {
     let mut current_funding: f64 = 0.0;
     let mut last_candle_open_time: u64 = 0;
 
+    candle_builder.seed_history(&symbol).await;
+
     display::init();
 
     let run = async {
@@ -48,7 +50,7 @@ async fn main() {
                         candle_builder.update_book(m.mid_price, m.imbalance);
                         let cvd = cvd_engine.snapshot();
                         alert_engine.check(&m, &cvd);
-                        display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent());
+                        display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent(), candle_builder.history());
                     }
                     None => break,
                 },
