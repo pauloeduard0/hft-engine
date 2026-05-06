@@ -281,21 +281,22 @@ fn render_signal(out: &mut impl Write, signal: &Signal) {
     let _ = out.queue(Print("║  "));
     let _ = out.queue(SetForegroundColor(dir_color));
     let _ = out.queue(Print(format!("{} {}  {}  {:.0}%  score {}", sym, label, bar, pct, score_str)));
-    let content_len = main_line.len() - 2;
-    let pad = BOX_W.saturating_sub(content_len + 2);
+    let pad = BOX_W.saturating_sub(main_line.chars().count());
     let _ = out.queue(Print(" ".repeat(pad)));
+    let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
     let _ = out.queue(SetForegroundColor(Color::Magenta));
     let _ = out.queue(Print("║\n"));
     let _ = out.queue(Print(box_line("")));
 
     for reason in &signal.reasons {
-        let truncated = if reason.len() > BOX_W - 4 { &reason[..BOX_W - 4] } else { reason.as_str() };
+        let truncated: String = reason.chars().take(BOX_W - 4).collect();
         let line = format!("  • {}", truncated);
         let _ = out.queue(SetForegroundColor(Color::DarkGrey));
         let _ = out.queue(Print(box_line(&line)));
     }
 
     for _ in 0..(4usize.saturating_sub(signal.reasons.len())) {
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
         let _ = out.queue(Print(box_line("")));
     }
 

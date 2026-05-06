@@ -51,14 +51,14 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
         if price_up && !cvd_pos {
             score -= 3.0;
             reasons.push(format!(
-                "CVD divergente: fechou ALTA ({:.2}%), execução vendedora ({:.2} BTC)",
-                price_change_pct * 100.0, last.candle_cvd
+                "[-3.0] CVD divergente: fechou ALTA ({:.2}%), execução vendedora",
+                price_change_pct * 100.0
             ));
         } else if !price_up && cvd_pos {
             score += 3.0;
             reasons.push(format!(
-                "CVD divergente: fechou BAIXA ({:.2}%), execução compradora (+{:.2} BTC)",
-                price_change_pct * 100.0, last.candle_cvd
+                "[+3.0] CVD divergente: fechou BAIXA ({:.2}%), execução compradora",
+                price_change_pct * 100.0
             ));
         }
     }
@@ -68,20 +68,20 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
     // cvd_dominance alto + preço alinhado → momentum genuíno → continuação
     if has_vol {
         if last.cvd_dominance < 0.25 {
-            // Muita execução bilateral = liquidez absorvendo tudo → reversão
             let dir = if cvd_pos { -1.0 } else { 1.0 };
             score += dir * 2.0;
+            let score_tag = if dir < 0.0 { "[-2.0]" } else { "[+2.0]" };
             reasons.push(format!(
-                "Absorção alta: dominância CVD baixa ({:.2}) → pressão absorvida",
-                last.cvd_dominance
+                "{} Absorção alta: dom. CVD {:.2} → pressão absorvida",
+                score_tag, last.cvd_dominance
             ));
         } else if last.cvd_dominance > 0.6 && last.cvd_aligned {
-            // Execução muito unilateral e alinhada com preço → momentum
             let dir = if price_up { 1.0 } else { -1.0 };
             score += dir * 1.5;
+            let score_tag = if dir > 0.0 { "[+1.5]" } else { "[-1.5]" };
             reasons.push(format!(
-                "Momentum: CVD unilateral ({:.2}) e alinhado com preço",
-                last.cvd_dominance
+                "{} Momentum: CVD unilateral ({:.2}) alinhado",
+                score_tag, last.cvd_dominance
             ));
         }
     }
@@ -93,13 +93,13 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
         if imb > 0.3 && !cvd_pos {
             score -= 1.5;
             reasons.push(format!(
-                "Spoofing: book comprador (imb {:.2}), execução vendedora",
+                "[-1.5] Spoofing: book comprador (imb {:.2}), execução vendedora",
                 imb
             ));
         } else if imb < -0.3 && cvd_pos {
             score += 1.5;
             reasons.push(format!(
-                "Spoofing: book vendedor (imb {:.2}), execução compradora",
+                "[+1.5] Spoofing: book vendedor (imb {:.2}), execução compradora",
                 imb
             ));
         }
@@ -117,41 +117,38 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
             has_vol && price_up != cvd_pos;
 
         if prev_diverged && last_diverged {
-            // Mantém a mesma direção do sinal já acumulado
             let dir = if score < 0.0 { -1.0 } else { 1.0 };
             score += dir * 1.0;
-            reasons.push("2 candles consecutivos com divergência CVD → reforço".to_string());
+            let score_tag = if dir > 0.0 { "[+1.0]" } else { "[-1.0]" };
+            reasons.push(format!("{} 2 candles consecutivos com divergência CVD", score_tag));
         }
     }
 
-    // ── 5. Funding rate (peso ±1.5) ──────────────────────────────
-    // Funding muito positivo = mercado overleveraged LONG → pressão latente de baixa
-    // Funding muito negativo = overleveraged SHORT → pressão latente de alta
+    // ── 5. Premium index (peso ±1.5) ─────────────────────────────
+    // Premium positivo = futuros acima do spot → longs overleveraged → pressão de baixa
+    // Premium negativo = futuros abaixo do spot → shorts overleveraged → squeeze provável
     if funding_rate > 0.0005 {
-        // > +0.05% por 8h: extremo, longs pagando muito
         score -= 1.5;
         reasons.push(format!(
-            "Funding extremo LONG ({:.4}%/8h) → overleveraged, risco de liquidação",
+            "[-1.5] Premium extremo LONG ({:+.4}%) → risco de liquidação",
             funding_rate * 100.0
         ));
     } else if funding_rate > 0.0001 {
-        // > +0.01%: elevado
         score -= 0.75;
         reasons.push(format!(
-            "Funding elevado LONG ({:.4}%/8h) → mercado levemente overleveraged",
+            "[-0.75] Premium LONG ({:+.4}%) → futuros acima do spot",
             funding_rate * 100.0
         ));
-    } else if funding_rate < -0.0003 {
-        // < -0.03%: extremo bearish sentiment
+    } else if funding_rate < -0.0005 {
         score += 1.5;
         reasons.push(format!(
-            "Funding extremo SHORT ({:.4}%/8h) → overleveraged, squeeze provável",
+            "[+1.5] Premium extremo SHORT ({:+.4}%) → squeeze provável",
             funding_rate * 100.0
         ));
     } else if funding_rate < -0.0001 {
         score += 0.75;
         reasons.push(format!(
-            "Funding elevado SHORT ({:.4}%/8h) → pressão latente de alta",
+            "[+0.75] Premium SHORT ({:+.4}%) → futuros abaixo do spot",
             funding_rate * 100.0
         ));
     }
