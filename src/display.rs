@@ -172,21 +172,21 @@ pub fn render(
         let _ = out.queue(Print("\n"));
         let _ = out.queue(ResetColor);
 
-        // Funding rate
-        let (fund_color, fund_label) = if funding_rate > 0.0005 {
-            (Color::Red, "⚠ LONG overleveraged")
+        // Premium index (mark vs index price)
+        let (prem_color, prem_label) = if funding_rate > 0.0005 {
+            (Color::Red, "↑↑ LONG pressure forte")
         } else if funding_rate > 0.0001 {
-            (Color::Yellow, "↑ LONG elevado")
-        } else if funding_rate < -0.0003 {
-            (Color::Cyan, "⚠ SHORT overleveraged")
+            (Color::Yellow, "↑ LONG pressure")
+        } else if funding_rate < -0.0005 {
+            (Color::Cyan, "↓↓ SHORT pressure forte")
         } else if funding_rate < -0.0001 {
-            (Color::Cyan, "↓ SHORT elevado")
+            (Color::Cyan, "↓ SHORT pressure")
         } else {
             (Color::DarkGrey, "neutro")
         };
-        let _ = out.queue(Print("  Funding  "));
-        let _ = out.queue(SetForegroundColor(fund_color));
-        let _ = out.queue(Print(format!("{:>+.4}%  {}", funding_rate * 100.0, fund_label)));
+        let _ = out.queue(Print("  Premium  "));
+        let _ = out.queue(SetForegroundColor(prem_color));
+        let _ = out.queue(Print(format!("{:>+.4}%  {}", funding_rate * 100.0, prem_label)));
         let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
         let _ = out.queue(Print("\n"));
         let _ = out.queue(ResetColor);

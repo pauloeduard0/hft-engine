@@ -1,6 +1,8 @@
 use std::io::Write as IoWrite;
 use std::sync::atomic::Ordering;
 
+use reqwest;
+
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -23,6 +25,7 @@ pub struct FeedMsg {
 
 pub struct TradeMsg {
     pub timestamp: u64,
+    #[allow(dead_code)]
     pub price: f64,
     pub qty: f64,
     pub is_buyer_maker: bool, // true = seller agressivo; false = comprador agressivo
@@ -39,11 +42,11 @@ struct FuturesDepth {
 }
 
 #[derive(Deserialize)]
-struct MarkPriceEvent {
-    #[serde(rename = "r")]
-    funding_rate: String,
-    #[serde(rename = "T")]
-    next_time_ms: u64,
+struct PremiumIndex {
+    #[serde(rename = "markPrice")]
+    mark_price: String,
+    #[serde(rename = "indexPrice")]
+    index_price: String,
 }
 
 #[derive(Deserialize)]
@@ -205,43 +208,25 @@ async fn trade_loop(sym: String, tx: mpsc::Sender<TradeMsg>) {
 // ── markPrice@1s ──────────────────────────────────────────────
 
 async fn funding_loop(sym: String, tx: mpsc::Sender<FundingMsg>) {
-    let url = format!("wss://fstream.binance.com/ws/{}@markPrice@1s", sym);
-    log_err(&format!("funding url={}", url));
+    let sym_upper = sym.to_uppercase();
+    let url = format!("https://fapi.binance.com/fapi/v1/premiumIndex?symbol={}", sym_upper);
+    let client = reqwest::Client::new();
+    log_err(&format!("funding REST url={}", url));
     loop {
-        let request = match build_request(url.as_str()) {
-            Ok(r) => r,
-            Err(e) => { log_err(&format!("funding {e}")); tokio::time::sleep(tokio::time::Duration::from_secs(3)).await; continue; }
-        };
-        match connect_async(request).await {
-            Ok((ws, _)) => {
-                log_err("funding connected");
-                let (_, mut read) = ws.split();
-                let mut funding_count = 0u32;
-                while let Some(Ok(msg)) = read.next().await {
-                    let text = match msg {
-                        Message::Text(t) => t,
-                        Message::Binary(b) => String::from_utf8(b).unwrap_or_default(),
-                        _ => continue,
-                    };
-                    if funding_count < 2 {
-                        log_err(&format!("FUNDING raw={}", &text[..text.len().min(200)]));
-                        funding_count += 1;
-                    }
-                    let Ok(ev) = serde_json::from_str::<MarkPriceEvent>(&text) else {
-                        log_err(&format!("FUNDING parse fail: {}", &text[..text.len().min(100)]));
-                        continue;
-                    };
-                    let rate = ev.funding_rate.parse::<f64>().unwrap_or(0.0);
-                    let _ = tx.send(FundingMsg { rate, next_time_ms: ev.next_time_ms }).await;
+        match client.get(&url).send().await {
+            Ok(resp) => match resp.json::<PremiumIndex>().await {
+                Ok(pi) => {
+                    let mark = pi.mark_price.parse::<f64>().unwrap_or(0.0);
+                    let index = pi.index_price.parse::<f64>().unwrap_or(0.0);
+                    let rate = if index > 0.0 { (mark - index) / index } else { 0.0 };
+                    log_err(&format!("premium={:.6} mark={:.2} index={:.2}", rate, mark, index));
+                    let _ = tx.send(FundingMsg { rate, next_time_ms: 0 }).await;
                 }
-                log_err("funding ws closed");
-            }
-            Err(e) => {
-                TRADE_ERRORS.fetch_add(1, Ordering::Relaxed);
-                log_err(&format!("funding connect error: {e}"));
-            }
+                Err(e) => log_err(&format!("funding parse error: {e}")),
+            },
+            Err(e) => log_err(&format!("funding fetch error: {e}")),
         }
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }
 
