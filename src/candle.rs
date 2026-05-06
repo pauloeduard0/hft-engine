@@ -22,6 +22,14 @@ pub struct CandleData {
     pub funding_rate: f64,
 }
 
+pub struct CandleLiveStats {
+    pub open_imb: f64,
+    pub avg_imb: f64,
+    pub last_imb: f64,
+    pub delta_vol_sum: f64,  // acumulado de Δbook_volume no candle atual
+    pub delta_vol_avg: f64,  // média por tick
+}
+
 pub struct CandleBuilder {
     open: f64,
     high: f64,
@@ -31,6 +39,7 @@ pub struct CandleBuilder {
     last_imbalance: f64,
     imbalance_sum: f64,
     imbalance_count: u64,
+    delta_vol_sum: f64,
     last_funding_rate: f64,
     pub history: VecDeque<CandleData>,
 }
@@ -46,13 +55,14 @@ impl CandleBuilder {
             last_imbalance: 0.0,
             imbalance_sum: 0.0,
             imbalance_count: 0,
+            delta_vol_sum: 0.0,
             last_funding_rate: 0.0,
             history: VecDeque::with_capacity(20),
         }
     }
 
-    // Chamado a cada tick do book (depth) para atualizar OHLC e imbalance
-    pub fn update_book(&mut self, mid: f64, imbalance: f64) {
+    // Chamado a cada tick do book (depth) para atualizar OHLC, imbalance e delta de volume
+    pub fn update_book(&mut self, mid: f64, imbalance: f64, delta_vol: f64) {
         if mid <= 0.0 { return; }
         if self.open == 0.0 {
             self.open = mid;
@@ -63,6 +73,7 @@ impl CandleBuilder {
         self.last_price = mid;
         self.last_imbalance = imbalance;
         self.imbalance_sum += imbalance;
+        self.delta_vol_sum += delta_vol;
         self.imbalance_count += 1;
     }
 
@@ -122,6 +133,7 @@ impl CandleBuilder {
         self.open_imbalance = 0.0;
         self.last_imbalance = 0.0;
         self.imbalance_sum = 0.0;
+        self.delta_vol_sum = 0.0;
         self.imbalance_count = 0;
 
         Some(data)
@@ -129,6 +141,19 @@ impl CandleBuilder {
 
     pub fn history(&self) -> &VecDeque<CandleData> {
         &self.history
+    }
+
+    pub fn live_stats(&self) -> CandleLiveStats {
+        let count = self.imbalance_count as f64;
+        let avg_imb = if count > 0.0 { self.imbalance_sum / count } else { 0.0 };
+        let delta_vol_avg = if count > 0.0 { self.delta_vol_sum / count } else { 0.0 };
+        CandleLiveStats {
+            open_imb: self.open_imbalance,
+            avg_imb,
+            last_imb: self.last_imbalance,
+            delta_vol_sum: self.delta_vol_sum,
+            delta_vol_avg,
+        }
     }
 
     // Busca os últimos 20 candles de 5min da Binance Futures para semear o histórico.

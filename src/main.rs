@@ -47,10 +47,10 @@ async fn main() {
                     Some(feed_msg) => {
                         book.update(feed_msg.bids, feed_msg.asks);
                         let m = metrics_engine.compute(&book);
-                        candle_builder.update_book(m.mid_price, m.imbalance);
+                        candle_builder.update_book(m.mid_price, m.imbalance, m.delta_volume);
                         let cvd = cvd_engine.snapshot();
                         alert_engine.check(&m, &cvd);
-                        display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent(), candle_builder.history());
+                        display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent(), candle_builder.history(), candle_builder.live_stats());
                     }
                     None => break,
                 },

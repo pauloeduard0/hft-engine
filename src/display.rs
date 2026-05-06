@@ -9,7 +9,7 @@ use crossterm::{
 };
 
 use crate::alerts::{Alert, AlertLevel};
-use crate::candle::CandleData;
+use crate::candle::{CandleData, CandleLiveStats};
 use crate::cvd::CvdSnapshot;
 use crate::metrics::{Metrics, Trend};
 use crate::orderbook::OrderBook;
@@ -43,6 +43,7 @@ pub fn render(
     signal: &Signal,
     alerts: &VecDeque<Alert>,
     candle_history: &VecDeque<CandleData>,
+    live: CandleLiveStats,
 ) {
     let mut out = io::stdout();
     let _ = out.queue(cursor::MoveTo(0, 0));
@@ -107,8 +108,45 @@ pub fn render(
     };
     let _ = out.queue(Print("  Imbalance   "));
     let _ = out.queue(SetForegroundColor(imb_color));
-    let _ = out.queue(Print(format!("{}  {:+.3}\n", bar, m.imbalance)));
+    let _ = out.queue(Print(format!("{}  {:+.3}  live\n", bar, m.imbalance)));
     let _ = out.queue(ResetColor);
+
+    // Imbalance acumulado do candle em andamento: open → média → last
+    if live.open_imb != 0.0 || live.avg_imb != 0.0 {
+        let avg_color = if live.avg_imb > 0.15 {
+            Color::Green
+        } else if live.avg_imb < -0.15 {
+            Color::Red
+        } else {
+            Color::Yellow
+        };
+        let _ = out.queue(Print("  Imb candle  "));
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(format!("{:+.2} → ", live.open_imb)));
+        let _ = out.queue(SetForegroundColor(avg_color));
+        let _ = out.queue(Print(format!("{:+.2}", live.avg_imb)));
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(format!(" → {:+.2}  abr/méd/now", live.last_imb)));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(Print("\n"));
+        let _ = out.queue(ResetColor);
+
+        // ΔVol acumulado do candle: soma de todas as variações de book volume
+        let dv_color = if live.delta_vol_sum > 0.0 { Color::Green } else { Color::Red };
+        let _ = out.queue(Print("  ΔVol candle "));
+        let _ = out.queue(SetForegroundColor(dv_color));
+        let _ = out.queue(Print(format!("{:+.4}  ", live.delta_vol_sum)));
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(format!("méd/tick {:+.4}", live.delta_vol_avg)));
+        let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+        let _ = out.queue(Print("\n"));
+        let _ = out.queue(ResetColor);
+    } else {
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print("  Imb candle  aguardando ticks...\n"));
+        let _ = out.queue(Print("  ΔVol candle aguardando ticks...\n"));
+        let _ = out.queue(ResetColor);
+    }
 
     let _ = out.queue(SetForegroundColor(Color::Green));
     let _ = out.queue(Print(format!("  Bid Vol     {:>14.4}\n", m.bid_volume)));
