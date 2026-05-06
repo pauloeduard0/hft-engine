@@ -3,7 +3,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 
 use crate::cvd::CvdSnapshot;
-use crate::feed::KlineMsg;
 
 #[derive(Clone)]
 pub struct CandleData {
@@ -22,6 +21,10 @@ pub struct CandleData {
 }
 
 pub struct CandleBuilder {
+    open: f64,
+    high: f64,
+    low: f64,
+    last_price: f64,
     imbalance_sum: f64,
     imbalance_count: u64,
     last_funding_rate: f64,
@@ -31,6 +34,10 @@ pub struct CandleBuilder {
 impl CandleBuilder {
     pub fn new() -> Self {
         Self {
+            open: 0.0,
+            high: f64::MIN,
+            low: f64::MAX,
+            last_price: 0.0,
             imbalance_sum: 0.0,
             imbalance_count: 0,
             last_funding_rate: 0.0,
@@ -38,7 +45,13 @@ impl CandleBuilder {
         }
     }
 
-    pub fn update_imbalance(&mut self, imbalance: f64) {
+    // Chamado a cada tick do book (depth) para atualizar OHLC e imbalance
+    pub fn update_book(&mut self, mid: f64, imbalance: f64) {
+        if mid <= 0.0 { return; }
+        if self.open == 0.0 { self.open = mid; }
+        if mid > self.high { self.high = mid; }
+        if mid < self.low { self.low = mid; }
+        self.last_price = mid;
         self.imbalance_sum += imbalance;
         self.imbalance_count += 1;
     }
@@ -47,18 +60,18 @@ impl CandleBuilder {
         self.last_funding_rate = rate;
     }
 
-    // Chamado quando kline.is_closed == true
-    pub fn close_from_kline(&mut self, kline: &KlineMsg, cvd: &CvdSnapshot) -> Option<CandleData> {
-        if !kline.is_closed {
-            return None;
-        }
+    // Chamado quando CVD detecta fechamento de candle (novo timestamp de vela)
+    pub fn close_from_cvd(&mut self, open_time: u64, cvd: &CvdSnapshot) -> Option<CandleData> {
+        if self.open == 0.0 || self.last_price == 0.0 { return None; }
 
-        let price_up = kline.close > kline.open;
-        let cvd_positive = cvd.candle_cvd > 0.0;
+        let close = self.last_price;
+        let price_up = close > self.open;
+        let cvd_positive = cvd.prev_candle_cvd > 0.0;
         let cvd_aligned = (price_up && cvd_positive) || (!price_up && !cvd_positive);
 
-        let cvd_dominance = if cvd.candle_total_vol > 0.0 {
-            cvd.candle_cvd.abs() / cvd.candle_total_vol
+        let total_vol = cvd.prev_candle_buy_vol + cvd.prev_candle_sell_vol;
+        let cvd_dominance = if total_vol > 0.0 {
+            cvd.prev_candle_cvd.abs() / total_vol
         } else {
             0.0
         };
@@ -70,14 +83,14 @@ impl CandleBuilder {
         };
 
         let data = CandleData {
-            open_time: kline.open_time,
-            open: kline.open,
-            high: kline.high,
-            low: kline.low,
-            close: kline.close,
-            candle_cvd: cvd.candle_cvd,
-            buy_vol: cvd.candle_buy_vol,
-            sell_vol: cvd.candle_sell_vol,
+            open_time,
+            open: self.open,
+            high: self.high,
+            low: self.low,
+            close,
+            candle_cvd: cvd.prev_candle_cvd,
+            buy_vol: cvd.prev_candle_buy_vol,
+            sell_vol: cvd.prev_candle_sell_vol,
             avg_imbalance,
             cvd_dominance,
             cvd_aligned,
@@ -91,7 +104,9 @@ impl CandleBuilder {
         }
         self.history.push_back(data.clone());
 
-        // Reset imbalance para próxima vela
+        self.open = 0.0;
+        self.high = f64::MIN;
+        self.low = f64::MAX;
         self.imbalance_sum = 0.0;
         self.imbalance_count = 0;
 
@@ -106,27 +121,15 @@ impl CandleBuilder {
 fn save_csv(c: &CandleData) {
     let path = "candles.csv";
     let needs_header = !std::path::Path::new(path).exists();
-
-    let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) else {
-        return;
-    };
-
+    let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) else { return; };
     if needs_header {
-        let _ = writeln!(
-            f,
-            "open_time,open,high,low,close,candle_cvd,buy_vol,sell_vol,\
-             avg_imbalance,cvd_dominance,cvd_aligned,funding_rate"
-        );
+        let _ = writeln!(f, "open_time,open,high,low,close,candle_cvd,buy_vol,sell_vol,avg_imbalance,cvd_dominance,cvd_aligned,funding_rate");
     }
-
     let _ = writeln!(
         f,
         "{},{:.2},{:.2},{:.2},{:.2},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
-        c.open_time,
-        c.open, c.high, c.low, c.close,
+        c.open_time, c.open, c.high, c.low, c.close,
         c.candle_cvd, c.buy_vol, c.sell_vol,
-        c.avg_imbalance, c.cvd_dominance,
-        c.cvd_aligned as u8,
-        c.funding_rate,
+        c.avg_imbalance, c.cvd_dominance, c.cvd_aligned as u8, c.funding_rate,
     );
 }

@@ -19,12 +19,12 @@ async fn main() {
     let symbol = env::args().nth(1).unwrap_or_else(|| "btcusdt".to_string()).to_lowercase();
 
     let (depth_tx, mut depth_rx) = mpsc::channel(256);
-    let (kline_tx, mut kline_rx) = mpsc::channel(64);
+    let (trade_tx, mut trade_rx) = mpsc::channel(4096);
     let (funding_tx, mut funding_rx) = mpsc::channel(64);
 
     let sym = symbol.clone();
     tokio::spawn(async move {
-        feed::stream(&sym, depth_tx, kline_tx, funding_tx).await;
+        feed::stream(&sym, depth_tx, trade_tx, funding_tx).await;
     });
 
     let mut book = orderbook::OrderBook::new(&symbol);
@@ -34,6 +34,7 @@ async fn main() {
     let mut alert_engine = alerts::AlertEngine::new();
     let mut current_signal = signal::Signal::waiting();
     let mut current_funding: f64 = 0.0;
+    let mut last_candle_open_time: u64 = 0;
 
     display::init();
 
@@ -44,21 +45,22 @@ async fn main() {
                     Some(feed_msg) => {
                         book.update(feed_msg.bids, feed_msg.asks);
                         let m = metrics_engine.compute(&book);
-                        candle_builder.update_imbalance(m.imbalance);
+                        candle_builder.update_book(m.mid_price, m.imbalance);
                         let cvd = cvd_engine.snapshot();
                         alert_engine.check(&m, &cvd);
                         display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent());
                     }
                     None => break,
                 },
-                msg = kline_rx.recv() => match msg {
-                    Some(kline_msg) => {
-                        cvd_engine.update_kline(&kline_msg);
-                        if kline_msg.is_closed {
+                msg = trade_rx.recv() => match msg {
+                    Some(trade_msg) => {
+                        let just_closed = cvd_engine.update(&trade_msg);
+                        if just_closed {
                             let cvd = cvd_engine.snapshot();
-                            if let Some(_) = candle_builder.close_from_kline(&kline_msg, &cvd) {
+                            if let Some(_) = candle_builder.close_from_cvd(last_candle_open_time, &cvd) {
                                 current_signal = signal::generate(candle_builder.history(), current_funding);
                             }
+                            last_candle_open_time = (trade_msg.timestamp / (5 * 60 * 1000)) * (5 * 60 * 1000);
                         }
                     }
                     None => {}

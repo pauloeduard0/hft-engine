@@ -21,15 +21,11 @@ pub struct FeedMsg {
     pub asks: Vec<(f64, f64)>,
 }
 
-pub struct KlineMsg {
-    pub open_time: u64,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub volume: f64,
-    pub taker_buy_vol: f64,
-    pub is_closed: bool,
+pub struct TradeMsg {
+    pub timestamp: u64,
+    pub price: f64,
+    pub qty: f64,
+    pub is_buyer_maker: bool, // true = seller agressivo; false = comprador agressivo
 }
 
 // ── Deserialização ────────────────────────────────────────────
@@ -43,31 +39,6 @@ struct FuturesDepth {
 }
 
 #[derive(Deserialize)]
-struct KlineInner {
-    #[serde(rename = "t")]
-    open_time: u64,
-    #[serde(rename = "o")]
-    open: String,
-    #[serde(rename = "h")]
-    high: String,
-    #[serde(rename = "l")]
-    low: String,
-    #[serde(rename = "c")]
-    close: String,
-    #[serde(rename = "v")]
-    volume: String,
-    #[serde(rename = "V")]
-    taker_buy_vol: String,
-    #[serde(rename = "x")]
-    is_closed: bool,
-}
-
-#[derive(Deserialize)]
-struct KlineEvent {
-    k: KlineInner,
-}
-
-#[derive(Deserialize)]
 struct MarkPriceEvent {
     #[serde(rename = "r")]
     funding_rate: String,
@@ -75,18 +46,30 @@ struct MarkPriceEvent {
     next_time_ms: u64,
 }
 
+#[derive(Deserialize)]
+struct TradeEvent {
+    #[serde(rename = "T")]
+    timestamp: u64,
+    #[serde(rename = "p")]
+    price: String,
+    #[serde(rename = "q")]
+    qty: String,
+    #[serde(rename = "m")]
+    is_buyer_maker: bool,
+}
+
 // ── Stream principal ──────────────────────────────────────────
 
 pub async fn stream(
     symbol: &str,
     depth_tx: mpsc::Sender<FeedMsg>,
-    kline_tx: mpsc::Sender<KlineMsg>,
+    trade_tx: mpsc::Sender<TradeMsg>,
     funding_tx: mpsc::Sender<FundingMsg>,
 ) {
     let sym = symbol.to_lowercase();
 
     let sym_k = sym.clone();
-    tokio::spawn(async move { kline_loop(sym_k, kline_tx).await });
+    tokio::spawn(async move { trade_loop(sym_k, trade_tx).await });
 
     let sym_f = sym.clone();
     tokio::spawn(async move { funding_loop(sym_f, funding_tx).await });
@@ -128,8 +111,8 @@ async fn depth_loop(sym: String, tx: mpsc::Sender<FeedMsg>) {
 
 // ── kline_5m ──────────────────────────────────────────────────
 
-async fn kline_loop(sym: String, tx: mpsc::Sender<KlineMsg>) {
-    let url = format!("wss://fstream.binance.com/ws/{}@kline_5m", sym);
+async fn trade_loop(sym: String, tx: mpsc::Sender<TradeMsg>) {
+    let url = format!("wss://fstream.binance.com/ws/{}@trade", sym);
     log_err(&format!("kline url={}", url));
     loop {
         let request = match build_request(url.as_str()) {
@@ -139,48 +122,77 @@ async fn kline_loop(sym: String, tx: mpsc::Sender<KlineMsg>) {
         match connect_async(request).await {
             Ok((ws, resp)) => {
                 log_err(&format!("kline connected status={}", resp.status()));
-                let (_, mut read) = ws.split();
-                while let Some(result) = read.next().await {
-                    let text = match result {
-                        Ok(Message::Text(t)) => t,
-                        Ok(Message::Binary(b)) => match String::from_utf8(b) {
-                            Ok(s) => s,
-                            Err(_) => continue,
-                        },
-                        Ok(Message::Close(f)) => {
-                            log_err(&format!("kline CLOSE: {:?}", f));
+
+                let (mut write, mut read) = ws.split(); // ✔️ AQUI
+
+                use tokio::time::{timeout, Duration};
+                use futures_util::SinkExt;
+
+                loop {
+                    match timeout(Duration::from_secs(10), read.next()).await {
+                        Err(_) => {
+                            log_err("kline TIMEOUT sem mensagens");
                             break;
                         }
-                        Err(e) => {
-                            log_err(&format!("kline ERR: {e}"));
+
+                        Ok(None) => {
+                            log_err("kline stream terminou");
                             break;
                         }
-                        _ => continue,
-                    };
-                    let n = KLINE_COUNT.fetch_add(1, AtomOrd::Relaxed);
-                    if n < 3 {
-                        log_err(&format!("KLINE raw={}", &text[..text.len().min(300)]));
+
+                        Ok(Some(result)) => {
+                            let text = match result {
+                                Ok(Message::Text(t)) => t,
+
+                                Ok(Message::Binary(b)) => match String::from_utf8(b) {
+                                    Ok(s) => s,
+                                    Err(_) => continue,
+                                },
+
+                                Ok(Message::Ping(payload)) => {
+                                    let _ = write.send(Message::Pong(payload)).await;
+                                    log_err("kline PING -> PONG");
+                                    continue;
+                                }
+
+                                Ok(Message::Pong(_)) => continue,
+
+                                Ok(Message::Close(f)) => {
+                                    log_err(&format!("kline CLOSE: {:?}", f));
+                                    break;
+                                }
+
+                                Err(e) => {
+                                    log_err(&format!("kline ERR: {e}"));
+                                    break;
+                                }
+
+                                _ => continue,
+                            };
+
+                            KLINE_COUNT.fetch_add(1, AtomOrd::Relaxed);
+
+                            let Ok(ev) = serde_json::from_str::<TradeEvent>(&text) else {
+                                continue;
+                            };
+
+                            let price = ev.price.parse::<f64>().unwrap_or(0.0);
+                            let qty = ev.qty.parse::<f64>().unwrap_or(0.0);
+                            if price > 0.0 && qty > 0.0 {
+                                let _ = tx.send(TradeMsg {
+                                    timestamp: ev.timestamp,
+                                    price,
+                                    qty,
+                                    is_buyer_maker: ev.is_buyer_maker,
+                                }).await;
+                            }
+                        }
                     }
-                    let Ok(ev) = serde_json::from_str::<KlineEvent>(&text) else {
-                        continue;
-                    };
-                    let k = ev.k;
-                    let p = |s: String| s.parse::<f64>().unwrap_or(0.0);
-                    let _ = tx
-                        .send(KlineMsg {
-                            open_time: k.open_time,
-                            open: p(k.open),
-                            high: p(k.high),
-                            low: p(k.low),
-                            close: p(k.close),
-                            volume: p(k.volume),
-                            taker_buy_vol: p(k.taker_buy_vol),
-                            is_closed: k.is_closed,
-                        })
-                        .await;
                 }
+
                 log_err("kline stream encerrado");
             }
+
             Err(e) => {
                 TRADE_ERRORS.fetch_add(1, Ordering::Relaxed);
                 log_err(&format!("kline connect error: {e}"));

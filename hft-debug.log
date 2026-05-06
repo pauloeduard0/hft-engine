@@ -1,5 +1,7 @@
-depth url=wss://fstream.binance.com/ws/btcusdt@depth20@100mskline url=wss://fstream.binance.com/ws/btcusdt@kline_5m
+depth url=wss://fstream.binance.com/ws/btcusdt@depth20@100mskline url=wss://fstream.binance.com/ws/btcusdt@trade
 
 funding url=wss://fstream.binance.com/ws/btcusdt@markPrice@1s
-funding connected
 kline connected status=101 Switching Protocols
+funding connected
+kline PING -> PONG
+kline PING -> PONG
