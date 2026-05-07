@@ -31,18 +31,29 @@ impl Signal {
 const MAX_SCORE: f64 = 13.5;
 
 pub fn compute_rsi(history: &VecDeque<CandleData>) -> Option<f64> {
+    const PERIOD: usize = 14;
     let n = history.len();
-    if n < 4 { return None; }
-    let periods = (n - 1).min(14);
-    let start = n - 1 - periods;
-    let mut gains = 0.0f64;
-    let mut losses = 0.0f64;
-    for i in (start + 1)..n {
+    if n < PERIOD + 1 { return None; }
+
+    // Inicializa com média simples dos primeiros 14 períodos (método Wilder)
+    let mut avg_gain = 0.0f64;
+    let mut avg_loss = 0.0f64;
+    for i in 1..=PERIOD {
         let change = history[i].close - history[i - 1].close;
-        if change > 0.0 { gains += change; } else { losses += change.abs(); }
+        if change > 0.0 { avg_gain += change; } else { avg_loss += change.abs(); }
     }
-    let avg_gain = gains / periods as f64;
-    let avg_loss = losses / periods as f64;
+    avg_gain /= PERIOD as f64;
+    avg_loss /= PERIOD as f64;
+
+    // Suavização de Wilder para os períodos restantes
+    for i in (PERIOD + 1)..n {
+        let change = history[i].close - history[i - 1].close;
+        let gain = if change > 0.0 { change } else { 0.0 };
+        let loss = if change < 0.0 { change.abs() } else { 0.0 };
+        avg_gain = (avg_gain * (PERIOD as f64 - 1.0) + gain) / PERIOD as f64;
+        avg_loss = (avg_loss * (PERIOD as f64 - 1.0) + loss) / PERIOD as f64;
+    }
+
     if avg_loss == 0.0 { return Some(100.0); }
     Some(100.0 - (100.0 / (1.0 + avg_gain / avg_loss)))
 }
@@ -105,8 +116,8 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
     }
 
     // ── 3. Book vs execução real (peso ±1.5) ─────────────────────
-    // close_imbalance (estado no fechamento) vs direção do CVD → spoofing ou acumulação oculta
-    let imb = last.close_imbalance;
+    // avg_imbalance (pressão média ao longo do candle) vs direção do CVD → spoofing ou acumulação oculta
+    let imb = last.avg_imbalance;
     if has_vol {
         if imb > 0.3 && !cvd_pos {
             score -= 1.5;
@@ -222,13 +233,23 @@ pub fn generate(history: &VecDeque<CandleData>, funding_rate: f64) -> Signal {
                     ));
                 }
             } else if vol_ratio >= 1.5 {
-                let dir = if price_up { -0.5 } else { 0.5 };
-                score += dir;
-                let tag = if dir < 0.0 { "[-0.5]" } else { "[+0.5]" };
-                reasons.push(format!(
-                    "{} Volume elevado {:.1}x vs média",
-                    tag, vol_ratio
-                ));
+                if !last.cvd_aligned {
+                    let dir = if price_up { -0.75 } else { 0.75 };
+                    score += dir;
+                    let tag = if dir < 0.0 { "[-0.75]" } else { "[+0.75]" };
+                    reasons.push(format!(
+                        "{} Volume elevado {:.1}x + CVD divergente → pressão de reversão",
+                        tag, vol_ratio
+                    ));
+                } else {
+                    let dir = if price_up { 0.5 } else { -0.5 };
+                    score += dir;
+                    let tag = if dir > 0.0 { "[+0.5]" } else { "[-0.5]" };
+                    reasons.push(format!(
+                        "{} Volume elevado {:.1}x + CVD alinhado → momentum confirmado",
+                        tag, vol_ratio
+                    ));
+                }
             }
         }
     }

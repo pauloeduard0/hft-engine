@@ -122,7 +122,7 @@ impl CandleBuilder {
 
         save_csv(&data);
 
-        if self.history.len() >= 20 {
+        if self.history.len() >= 100 {
             self.history.pop_front();
         }
         self.history.push_back(data.clone());
@@ -161,7 +161,7 @@ impl CandleBuilder {
     pub async fn seed_history(&mut self, symbol: &str) {
         let sym = symbol.to_uppercase();
         let url = format!(
-            "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=5m&limit=20",
+            "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=5m&limit=100",
             sym
         );
         let client = reqwest::Client::new();
@@ -189,7 +189,7 @@ impl CandleBuilder {
             let cvd_dominance = if vol > 0.0 { candle_cvd.abs() / vol } else { 0.0 };
             let cvd_aligned  = (price_up && cvd_positive) || (!price_up && !cvd_positive);
 
-            if self.history.len() >= 20 { self.history.pop_front(); }
+            if self.history.len() >= 100 { self.history.pop_front(); }
             self.history.push_back(CandleData {
                 open_time,
                 open, high, low, close,
