@@ -7,6 +7,7 @@ mod funding;
 mod metrics;
 mod orderbook;
 mod signal;
+mod signal_log;
 mod trades;
 
 use std::env;
@@ -33,6 +34,7 @@ async fn main() {
     let mut candle_builder = candle::CandleBuilder::new();
     let mut alert_engine = alerts::AlertEngine::new();
     let mut current_signal = signal::Signal::waiting();
+    let mut signal_log = signal_log::SignalLog::new();
     let mut current_funding: f64 = 0.0;
     let mut last_candle_open_time: u64 = 0;
 
@@ -50,7 +52,7 @@ async fn main() {
                         candle_builder.update_book(m.mid_price, m.imbalance, m.delta_volume);
                         let cvd = cvd_engine.snapshot();
                         alert_engine.check(&m, &cvd);
-                        display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent(), candle_builder.history(), candle_builder.live_stats());
+                        display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent(), candle_builder.history(), candle_builder.live_stats(), &signal_log);
                     }
                     None => break,
                 },
@@ -61,6 +63,7 @@ async fn main() {
                             let cvd = cvd_engine.snapshot();
                             if let Some(_) = candle_builder.close_from_cvd(last_candle_open_time, &cvd) {
                                 current_signal = signal::generate(candle_builder.history(), current_funding);
+                                signal_log.record(&current_signal);
                             }
                             last_candle_open_time = (trade_msg.timestamp / (5 * 60 * 1000)) * (5 * 60 * 1000);
                         }

@@ -15,6 +15,7 @@ use crate::metrics::{Metrics, Trend};
 use crate::orderbook::OrderBook;
 use crate::feed::KLINE_COUNT;
 use crate::signal::{compute_rsi, Direction, Signal};
+use crate::signal_log::SignalLog;
 
 pub fn init() {
     let mut out = io::stdout();
@@ -44,6 +45,7 @@ pub fn render(
     alerts: &VecDeque<Alert>,
     candle_history: &VecDeque<CandleData>,
     live: CandleLiveStats,
+    signal_log: &SignalLog,
 ) {
     let mut out = io::stdout();
     let _ = out.queue(cursor::MoveTo(0, 0));
@@ -360,6 +362,34 @@ pub fn render(
 
     // ── Sinal próximo candle ──────────────────────────────────────
     render_signal(&mut out, signal);
+
+    // ── Painel de entradas fortes ─────────────────────────────────
+    let _ = out.queue(Print("\n"));
+    let count_color = if signal_log.count > 0 { Color::Cyan } else { Color::DarkGrey };
+    let _ = out.queue(SetForegroundColor(count_color));
+    let _ = out.queue(Print(format!("  Entradas fortes ≥60%: {}", signal_log.count)));
+    let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+    let _ = out.queue(Print("\n"));
+
+    if let Some(last) = signal_log.recent.back() {
+        let (dir_sym, dir_color) = match last.direction {
+            Direction::Bullish => ("▲ BULLISH", Color::Green),
+            Direction::Bearish => ("▼ BEARISH", Color::Red),
+            Direction::Neutral => ("─ NEUTRO ", Color::Yellow),
+        };
+        let star = if last.high_conviction { " ★" } else { "" };
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(format!("  Última: {} ", last.time_str)));
+        let _ = out.queue(SetForegroundColor(dir_color));
+        let _ = out.queue(Print(dir_sym));
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print(format!("  {:.0}%  score {:+.1}{}\n", last.pct, last.score, star)));
+    } else {
+        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+        let _ = out.queue(Print("  Última: —\n"));
+    }
+    let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
+    let _ = out.queue(ResetColor);
 
     let _ = out.flush();
 }
