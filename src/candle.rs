@@ -158,11 +158,11 @@ impl CandleBuilder {
 
     // Busca os últimos 20 candles de 5min da Binance Futures para semear o histórico.
     // Garante que RSI-14 e volume médio estejam calibrados desde o primeiro candle ao vivo.
-    pub async fn seed_history(&mut self, symbol: &str) {
+    pub async fn seed_history(&mut self, symbol: &str, interval: &str) {
         let sym = symbol.to_uppercase();
         let url = format!(
-            "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=5m&limit=100",
-            sym
+            "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval={}&limit=100",
+            sym, interval
         );
         let client = reqwest::Client::new();
         let Ok(resp) = client.get(&url).send().await else { return; };

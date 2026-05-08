@@ -18,6 +18,14 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() {
     let symbol = env::args().nth(1).unwrap_or_else(|| "btcusdt".to_string()).to_lowercase();
+    let tf_arg = env::args().nth(2).unwrap_or_else(|| "15m".to_string()).to_lowercase();
+    let (candle_ms, interval) = match tf_arg.as_str() {
+        "5m"  => (5  * 60 * 1000u64, "5m"),
+        "15m" => (15 * 60 * 1000u64, "15m"),
+        "1h"  => (60 * 60 * 1000u64, "1h"),
+        "4h"  => (4 * 60 * 60 * 1000u64, "4h"),
+        other => { eprintln!("Timeframe inválido: {other}. Use: 5m | 15m | 1h | 4h"); std::process::exit(1); }
+    };
 
     let (depth_tx, mut depth_rx) = mpsc::channel(256);
     let (trade_tx, mut trade_rx) = mpsc::channel(4096);
@@ -30,7 +38,7 @@ async fn main() {
 
     let mut book = orderbook::OrderBook::new(&symbol);
     let mut metrics_engine = metrics::MetricsEngine::new();
-    let mut cvd_engine = cvd::CvdEngine::new();
+    let mut cvd_engine = cvd::CvdEngine::new(candle_ms);
     let mut candle_builder = candle::CandleBuilder::new();
     let mut alert_engine = alerts::AlertEngine::new();
     let mut current_signal = signal::Signal::waiting();
@@ -38,7 +46,7 @@ async fn main() {
     let mut current_funding: f64 = 0.0;
     let mut last_candle_open_time: u64 = 0;
 
-    candle_builder.seed_history(&symbol).await;
+    candle_builder.seed_history(&symbol, interval).await;
 
     display::init();
 
@@ -52,7 +60,7 @@ async fn main() {
                         candle_builder.update_book(m.mid_price, m.imbalance, m.delta_volume);
                         let cvd = cvd_engine.snapshot();
                         alert_engine.check(&m, &cvd);
-                        display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent(), candle_builder.history(), candle_builder.live_stats(), &signal_log);
+                        display::render(&book, &m, &cvd, current_funding, &current_signal, alert_engine.recent(), candle_builder.history(), candle_builder.live_stats(), &signal_log, interval);
                     }
                     None => break,
                 },
@@ -65,7 +73,7 @@ async fn main() {
                                 current_signal = signal::generate(candle_builder.history(), current_funding);
                                 signal_log.record(&current_signal);
                             }
-                            last_candle_open_time = (trade_msg.timestamp / (5 * 60 * 1000)) * (5 * 60 * 1000);
+                            last_candle_open_time = (trade_msg.timestamp / candle_ms) * candle_ms;
                         }
                     }
                     None => {}

@@ -46,6 +46,7 @@ pub fn render(
     candle_history: &VecDeque<CandleData>,
     live: CandleLiveStats,
     signal_log: &SignalLog,
+    interval: &str,
 ) {
     let mut out = io::stdout();
     let _ = out.queue(cursor::MoveTo(0, 0));
@@ -170,14 +171,14 @@ pub fn render(
     let _ = out.queue(Print(format!("  Micro Trend {}\n", trend_str)));
     let _ = out.queue(ResetColor);
 
-    // ── CVD (kline 5m) ────────────────────────────────────────────
+    // ── CVD (kline 15m) ────────────────────────────────────────────
     let _ = out.queue(Print("\n"));
     let _ = out.queue(SetForegroundColor(Color::Cyan));
 
     if cvd.has_data {
         let mins = cvd.candle_elapsed_secs / 60;
         let secs = cvd.candle_elapsed_secs % 60;
-        let _ = out.queue(Print(format!("  CVD  —  @trade  ({mins}m{secs:02}s / 5m)\n")));
+        let _ = out.queue(Print(format!("  CVD  —  @trade  ({mins}m{secs:02}s / {interval})\n")));
         let _ = out.queue(ResetColor);
 
         let ratio = if cvd.candle_total_vol > 0.0 {
@@ -234,7 +235,7 @@ pub fn render(
         let _ = out.queue(ResetColor);
     } else {
         let klines = KLINE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-        let _ = out.queue(Print(format!("  CVD  —  aguardando kline 5m... (msgs não-depth: {klines})")));
+        let _ = out.queue(Print(format!("  CVD  —  aguardando kline {interval}... (msgs não-depth: {klines})")));
         let _ = out.queue(terminal::Clear(ClearType::UntilNewLine));
         let _ = out.queue(Print("\n"));
         let _ = out.queue(ResetColor);
@@ -361,7 +362,7 @@ pub fn render(
     }
 
     // ── Sinal próximo candle ──────────────────────────────────────
-    render_signal(&mut out, signal);
+    render_signal(&mut out, signal, interval);
 
     // ── Painel de entradas fortes ─────────────────────────────────
     let _ = out.queue(Print("\n"));
@@ -406,11 +407,13 @@ fn box_line(content: &str) -> String {
     format!("║{:<width$}║\n", content_truncated, width = max_content + 2)
 }
 
-fn render_signal(out: &mut impl Write, signal: &Signal) {
+fn render_signal(out: &mut impl Write, signal: &Signal, interval: &str) {
     let _ = out.queue(Print("\n"));
     let _ = out.queue(SetForegroundColor(Color::Magenta));
     let _ = out.queue(Print("╔══════════════════════════════════════════════════════╗\n"));
-    let _ = out.queue(Print("║  SINAL  ──  PRÓXIMO CANDLE (5min)                   ║\n"));
+    let header = format!("║  SINAL  ──  PRÓXIMO CANDLE ({interval})");
+    let pad = 55usize.saturating_sub(header.chars().count());
+    let _ = out.queue(Print(format!("{}{}║\n", header, " ".repeat(pad))));
     let _ = out.queue(Print("╠══════════════════════════════════════════════════════╣\n"));
 
     if !signal.has_data() {

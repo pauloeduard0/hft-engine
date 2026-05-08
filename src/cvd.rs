@@ -1,7 +1,5 @@
 use crate::feed::TradeMsg;
 
-const CANDLE_MS: u64 = 5 * 60 * 1000;
-
 pub struct CvdSnapshot {
     pub candle_cvd: f64,
     pub candle_buy_vol: f64,
@@ -17,6 +15,7 @@ pub struct CvdSnapshot {
 }
 
 pub struct CvdEngine {
+    candle_ms: u64,
     candle_start_ms: u64,
     candle_cvd: f64,
     candle_buy_vol: f64,
@@ -29,8 +28,9 @@ pub struct CvdEngine {
 }
 
 impl CvdEngine {
-    pub fn new() -> Self {
+    pub fn new(candle_ms: u64) -> Self {
         Self {
+            candle_ms,
             candle_start_ms: 0,
             candle_cvd: 0.0,
             candle_buy_vol: 0.0,
@@ -43,11 +43,10 @@ impl CvdEngine {
         }
     }
 
-    // Retorna true quando uma vela de 5min acabou de fechar
     pub fn update(&mut self, trade: &TradeMsg) -> bool {
         let delta = if trade.is_buyer_maker { -trade.qty } else { trade.qty };
         let ts = trade.timestamp;
-        let candle = (ts / CANDLE_MS) * CANDLE_MS;
+        let candle = (ts / self.candle_ms) * self.candle_ms;
 
         let mut just_closed = false;
 
